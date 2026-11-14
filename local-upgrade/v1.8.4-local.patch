@@ -1,0 +1,439 @@
+diff --git a/cli/main.ts b/cli/main.ts
+index 8624663..a672902 100644
+--- a/cli/main.ts
++++ b/cli/main.ts
+@@ -25,6 +25,7 @@ import {
+ } from "../host/service.ts";
+ import { versionLine } from "../host/version.ts";
+ import { clockFor, colorFor, render, replayCommand, skippedLine } from "./status.ts";
++import { localOrgScheduleDisplay } from "./org-schedule.ts";
+ import { attemptsOf, newFailure, waitingRetry } from "./try.ts";
+ 
+ const ROOT = path.join(import.meta.dirname, "..");
+@@ -482,7 +483,12 @@ async function tryIt() {
+ async function status(named: Flags) {
+   const state = await ownerClient().state();
+   if (named.json !== undefined) return console.log(JSON.stringify(state, null, 2));
+-  console.log(render(state, { color: colorFor(process.stdout, process.env), columns: process.stdout.columns }));
++  console.log(
++    render(await localOrgScheduleDisplay(state), {
++      color: colorFor(process.stdout, process.env),
++      columns: process.stdout.columns,
++    }),
++  );
+ }
+ 
+ async function runs(args: string[]) {
+diff --git a/cli/org-schedule.ts b/cli/org-schedule.ts
+new file mode 100644
+index 0000000..d8fc090
+--- /dev/null
++++ b/cli/org-schedule.ts
+@@ -0,0 +1,39 @@
++// Local display adapter only: scheduling and the raw API remain untouched.
++// Import the workflow's own calendar predicate rather than maintaining a second holiday list.
++import { homedir } from "node:os";
++import { join } from "node:path";
++import { pathToFileURL } from "node:url";
++
++type Workday = (date: string) => boolean | null;
++type Line = { agent?: string; every: string | null; next: string | null; nextLabel?: string };
++const gates = new Set(["org-morning-gate", "org-afternoon-gate", "org-rollup-gate"]);
++
++export function orgScheduleDisplay<T extends { lines: Line[] }>(state: T, workday: Workday): T {
++  return {
++    ...state,
++    lines: state.lines.map((line) => {
++      if (!gates.has(line.agent ?? "") || !line.next || !line.every) return line;
++      const raw = new Date(line.next);
++      const local = new Date(raw.getTime() + 8 * 3600000).toISOString();
++      const every = "工作日 " + local.slice(11, 16) + "（含调休）";
++      for (let offset = 0; offset < 366; offset++) {
++        const next = new Date(raw.getTime() + offset * 86400000);
++        const date = new Date(next.getTime() + 8 * 3600000).toISOString().slice(0, 10);
++        const eligible = workday(date);
++        if (eligible === null) break;
++        if (eligible) return { ...line, every, next: next.toISOString() };
++      }
++      return { ...line, every, next: null, nextLabel: "未知，工作日日历待维护" };
++    }),
++  };
++}
++
++export async function localOrgScheduleDisplay<T extends { lines: Line[] }>(state: T): Promise<T> {
++  if (!state.lines.some((line) => gates.has(line.agent ?? ""))) return state;
++  try {
++    const gate = await import(pathToFileURL(join(homedir(), ".agent-autoloop", "org-optimization", "gate.mjs")).href);
++    return orgScheduleDisplay(state, gate.workday);
++  } catch {
++    return orgScheduleDisplay(state, () => null);
++  }
++}
+diff --git a/cli/status.ts b/cli/status.ts
+index bf0cfb7..1961bbc 100644
+--- a/cli/status.ts
++++ b/cli/status.ts
+@@ -119,10 +119,10 @@ export const finished = (run: any) => run.state !== "claimed" && run.state !== "
+ /** Finished runs, each its own entry: when it ended, its number, how and its rule, then a line or two of what came of it. */
+ export function runRows(state: any, runs: any[], { color, columns }: { color: boolean; columns?: number }) {
+   const room = Math.min(columns || 100, 120);
+-  const { dim, red, green, yellow } = stylesFor(color);
++  const { dim, red, yellow } = stylesFor(color);
+   const { when } = clockFor(state);
+   const RUN_LOOK: Record<string, [string, Style]> = {
+-    done: ["做完了", green],
++    done: ["本轮已结束", dim],
+     nothing: ["没事可做", dim],
+     cancelled: ["停了", yellow],
+     unknown: ["不确定", red],
+@@ -160,6 +160,13 @@ export function render(state: any, { color, columns }: { color: boolean; columns
+   };
+ 
+   const { totals } = state;
++  type Timer = { rule: string; lane: string; at: string };
++  const nextChecks = new Map<string, Timer>();
++  for (const timer of (state.timers ?? []) as Timer[]) {
++    const key = JSON.stringify([timer.rule, timer.lane]);
++    const previous = nextChecks.get(key);
++    if (!previous || Date.parse(timer.at) < Date.parse(previous.at)) nextChecks.set(key, timer);
++  }
+   const count = (label: string, n: number, style: Style) =>
+     n > 0 ? `${label} ${bold(style(String(n)))}` : dim(`${label} 0`);
+   say(
+@@ -169,23 +176,48 @@ export function render(state: any, { color, columns }: { color: boolean; columns
+       count("排队", totals.queued - totals.retrying, yellow),
+       totals.retrying ? count("等重派", totals.retrying, yellow) : "",
+       totals.unknown ? count("不确定", totals.unknown, red) : "",
+-      `今天做完 ${totals.doneToday}`,
++      nextChecks.size ? count("等待复查", nextChecks.size, yellow) + " 项" : "",
++      `今天成功结束 ${totals.doneToday} 轮`,
+     ]
+       .filter(Boolean)
+       .join(dim(" · ")),
+   );
+   for (const line of spendLines(state.spending)) say(dim(line));
+ 
+-  const presence = [
+-    ...state.agents.map((agent: any) => ({ ...agent, where: agent.worker })),
+-    ...state.channels.map((channel: any) => ({ ...channel, where: "通道" })),
+-  ];
++  // This local workflow has several technical executors but is one business process.
++  // Keep the API/--json state intact and expose unavailable members rather than masking them.
++  const orgSteps = state.agents.filter(
++    (agent: any) => agent.id?.startsWith("org-") && agent.name.startsWith("组织优化 ·"),
++  );
++  const grouped = orgSteps.length > 1;
++  let shownOrg = false;
++  const agents = state.agents.flatMap((agent: any) => {
++    if (!grouped || !orgSteps.includes(agent)) return [{ ...agent, where: agent.worker }];
++    if (shownOrg) return [];
++    shownOrg = true;
++    return [
++      {
++        name: "组织优化每日流程",
++        where: [...new Set(orgSteps.map((step: any) => step.worker))].join("、"),
++        online: orgSteps.every((step: any) => step.online),
++        members: orgSteps,
++      },
++    ];
++  });
++  const presence = [...agents, ...state.channels.map((channel: any) => ({ ...channel, where: "通道" }))];
+   if (presence.length) section(heading("在线"));
+   const nameRoom = Math.max(0, ...presence.map((one) => width(one.name)));
+   const whereRoom = Math.max(0, ...presence.map((one) => width(one.where)));
+   for (const one of presence) {
+     const head = `  ${one.online ? green("●") : red("○")} ${pad(one.name, nameRoom)}  `;
+-    if (one.online) say(head + dim(one.where));
++    if (one.members) {
++      const online = one.members.filter((member: any) => member.online).length;
++      say(`${head}${dim(one.where)}  ${online}/${one.members.length} 个步骤在线`);
++      say(dim("    后台步骤已合并展示；完整详情：agent-autoloop status --json"));
++      for (const member of one.members.filter((member: any) => !member.online)) {
++        say(`    ${red(`${member.name}：离线`)}，最后在线 ${member.seenAt ? when(member.seenAt) : "没见过"}`);
++      }
++    } else if (one.online) say(head + dim(one.where));
+     else
+       say(
+         `${head}${dim(pad(one.where, whereRoom))}  ${red(`离线，最后在线 ${one.seenAt ? when(one.seenAt) : "没见过"}`)}`,
+@@ -247,6 +279,12 @@ export function render(state: any, { color, columns }: { color: boolean; columns
+     if (retry && run.error) for (const line of wrap(run.error, room - 6, 2)) say(`      ${red(line)}`);
+   }
+ 
++  if (nextChecks.size) section(heading("等待复查"));
++  for (const timer of [...nextChecks.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
++    const subject = timer.lane ? ` · ${timer.lane}` : "";
++    say(`  ${timer.rule}${subject}  ${yellow(`下次复查 ${when(timer.at)}`)}`);
++  }
++
+   const recentRuns = state.runs.filter(finished).slice(0, 8);
+   if (recentRuns.length) section(heading("最近几轮"));
+   for (const line of runRows(state, recentRuns, { color, columns })) say(line);
+@@ -287,11 +325,24 @@ export function render(state: any, { color, columns }: { color: boolean; columns
+   const timed = [...state.lines.filter((line: any) => line.every), ...state.elsewhere];
+   if (timed.length) section(heading("定时"));
+   const ruleRoom = Math.max(0, ...timed.map((line: any) => width(line.name)));
+-  const everyRoom = Math.max(0, ...timed.map((line: any) => width(line.every)));
+-  for (const line of timed) {
+-    const head = `  ${pad(line.name, ruleRoom)}  ${pad(line.every, everyRoom)}  下次 ${when(line.next)}`;
+-    const [where] = line.where ? wrap(`（在别处：${line.where}）`, room - width(head), 1) : [""];
+-    say(`  ${pad(line.name, ruleRoom)}  ${pad(line.every, everyRoom)}  ${dim("下次")} ${when(line.next)}${dim(where)}`);
++  const schedules = timed.map((line: any) => ({ ...line, nextText: line.nextLabel ?? when(line.next) }));
++  const nextRoom = Math.max(0, ...schedules.map((line: any) => width(line.nextText)));
++  const available = room - ruleRoom - nextRoom - width("      下次 ");
++  const everyRoom = Math.max(
++    0,
++    ...schedules.map((line: any) => width(line.every)).filter((w: number) => w <= available),
++  );
++  for (const line of schedules) {
++    const next = `${dim("下次")} ${line.nextText}`;
++    const place = line.where ? `（在别处：${line.where}）` : "";
++    if (width(line.every) > available) {
++      for (const part of wrap(`${line.name}  下次 ${line.nextText}`, room - 2)) say(`  ${part}`);
++      for (const part of wrap(line.every + place, room - 4)) say(`    ${part}`);
++      continue;
++    }
++    const head = `  ${pad(line.name, ruleRoom)}  ${pad(line.every, everyRoom)}  ${next}`;
++    const [where] = wrap(place, room - width(head), 1);
++    say(head + dim(where));
+   }
+ 
+   const unrouted = state.unrouted.slice(0, 5);
+diff --git a/kernel/cron.ts b/kernel/cron.ts
+index 44819d4..cde9e28 100644
+--- a/kernel/cron.ts
++++ b/kernel/cron.ts
+@@ -116,15 +116,64 @@ export function dayStart(now: number, zone: string) {
+ // of Node.
+ const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六", "日"];
+ 
+-/** A common schedule in plain words (每天 18:00, 每周日 06:00, 工作日 09:00, 每月 1 日 04:00); any other as written. */
++const twoDigits = (value: number) => String(value).padStart(2, "0");
++
++const ascending = (values: Iterable<number>) => [...values].sort((a, b) => a - b);
++
++function ranges(values: Iterable<number>) {
++  const spans: number[][] = [];
++  for (const value of ascending(values)) {
++    const last = spans.at(-1);
++    if (last && last[1] + 1 === value) last[1] = value;
++    else spans.push([value, value]);
++  }
++  return spans.map(([first, last]) => (first === last ? String(first) : `${first} 至 ${last}`)).join("、");
++}
++
++/** Describe any valid schedule using the same fields and day matching as nextRun. */
+ export function describeCron(text: string) {
+-  const [minute, hour, day, month, weekday] = text.trim().split(/\s+/);
+-  const number = /^\d+$/;
+-  if (!number.test(minute) || !number.test(hour) || month !== "*" || !parseCron(text)) return text;
+-  const at = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
+-  if (day === "*" && weekday === "*") return `每天 ${at}`;
+-  if (day === "*" && number.test(weekday)) return `每周${WEEKDAYS[Number(weekday)]} ${at}`;
+-  if (day === "*" && weekday === "1-5") return `工作日 ${at}`;
+-  if (number.test(day) && weekday === "*") return `每月 ${Number(day)} 日 ${at}`;
+-  return text;
++  const cron = parseCron(text);
++  if (!cron) return "无效的定时规则";
++  const { minutes, hours, days, months, weekdays, anyDay, anyWeekday } = cron;
++  const either = !anyDay && !anyWeekday;
++  const date = days.size === 31 ? "" : `${ranges(days)} 日`;
++  const week =
++    weekdays.size === 7
++      ? ""
++      : ascending(weekdays)
++          .map((day) => `周${WEEKDAYS[day]}`)
++          .join("、");
++  const month = months.size === 12 ? "" : `${ranges(months)} 月`;
++  let calendar = "每天";
++  if (!either || (date && week)) {
++    if (date && week) calendar = `${month ? month + "的 " : "每月 "}${date}${either ? "或" : "且为"}${week}`;
++    else if (date) calendar = `${month ? month + "的 " : "每月 "}${date}`;
++    else if (week) {
++      calendar = week === "周一、周二、周三、周四、周五" ? "工作日" : `每${week}`;
++      if (month) calendar = `${month}的${calendar}`;
++    }
++  }
++  if (calendar === "每天" && month) calendar = `${month}每天`;
++
++  if (hours.length === 1 && minutes.length === 1) return `${calendar} ${twoDigits(hours[0])}:${twoDigits(minutes[0])}`;
++  const step = minutes[1];
++  if (
++    hours.length === 24 &&
++    minutes[0] === 0 &&
++    step &&
++    60 % step === 0 &&
++    minutes.length === 60 / step &&
++    minutes.every((minute, index) => minute === index * step)
++  ) {
++    const interval = step === 1 ? "每分钟" : `每 ${step} 分钟`;
++    return calendar === "每天" ? interval : `${calendar}，${interval}`;
++  }
++  const withinHour =
++    minutes.length === 60
++      ? "每分钟"
++      : minutes.length === 1 && minutes[0] === 0
++        ? "每小时整点"
++        : `每小时第 ${minutes.length === 1 ? minutes[0] : minutes.map(twoDigits).join("、")} 分钟`;
++  if (hours.length < 24) return `${calendar} ${ranges(hours)} 时，${withinHour}`;
++  return calendar === "每天" ? withinHour : `${calendar}，${withinHour}`;
+ }
+diff --git a/skills/agent-autoloop/SKILL.md b/skills/agent-autoloop/SKILL.md
+index 1034505..3df9c7a 100644
+--- a/skills/agent-autoloop/SKILL.md
++++ b/skills/agent-autoloop/SKILL.md
+@@ -7,6 +7,14 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
+ 
+ 协议全文在 `docs/protocol.md`，这里是怎么做。程序在 `~/.agent-autoloop/app`，规则在 `~/.agent-autoloop/rules.json`，配置和密钥在 `~/.agent-autoloop/config.json`。
+ 
++## 本机升级
++
++在这台 Mac 上，从 PATH 运行以下命令。升级入口独立于 app 安装目录，换版时会把本节写入候选版 Skill 并验证帮助输出。
++
++- `agent-autoloop update` 用于正式升级。先移植本地补丁并验证，通过后才切换服务。切换失败会自动回滚。
++- `agent-autoloop update --check` 用于先确认新版本兼容本地补丁、规则和插件。只验证候选版，生产服务继续运行。
++- `agent-autoloop update --drill` 用于验证升级全过程。用独立端口、数据库和服务实例分别演练正常切换、故障回滚，生产服务继续运行。
++
+ ## 看情况、回答
+ 
+ `agent-autoloop status` 列出谁在线、等用户什么、在做什么、做过什么，还有按完成时间统计的今天和最近 7 天的轮数、Token 和费用（Token 含缓存，写出其中缓存占多少；同一轮重试的已报用量相加，没上报的轮数会写出来）。终端里它带颜色，接管道、被 Agent 调用或设了 `NO_COLOR` 时是纯文本。`agent-autoloop status --json` 输出 `/v1/state` 的原样结构，给脚本和看板用。`agent-autoloop answer <卡片> <序号>` 回答，`agent-autoloop resolve <卡片> <结果>` 结案，`agent-autoloop stop <第几轮>` 停掉一轮，等整个进程组退出才报告已停。
+diff --git a/tests/cron.test.ts b/tests/cron.test.ts
+index d75f39d..55a534e 100644
+--- a/tests/cron.test.ts
++++ b/tests/cron.test.ts
+@@ -78,6 +78,15 @@ test("common schedules read in plain words", () => {
+   assert.equal(describeCron("0 18 * * *"), "每天 18:00");
+   assert.equal(describeCron("0 6 * * 0"), "每周日 06:00");
+   assert.equal(describeCron("0 9 * * 1-5"), "工作日 09:00");
++  assert.equal(describeCron("0 9 * * 5,4,3,2,1"), "工作日 09:00");
+   assert.equal(describeCron("0 4 1 * *"), "每月 1 日 04:00");
+-  assert.equal(describeCron("*/5 * * * *"), "*/5 * * * *");
++  assert.equal(describeCron("*/5 * * * *"), "每 5 分钟");
++  assert.equal(describeCron("0 * * * *"), "每小时整点");
++  assert.equal(describeCron("15 * * * *"), "每小时第 15 分钟");
++  assert.equal(describeCron("5,20,35,40,50 10-23 * * *"), "每天 10 至 23 时，每小时第 05、20、35、40、50 分钟");
++  assert.equal(describeCron("0 9 1,15 1,7 1,3"), "1、7 月的 1、15 日或周一、周三 09:00");
++  assert.equal(
++    describeCron("0 9 */2 * 1"),
++    "每月 1、3、5、7、9、11、13、15、17、19、21、23、25、27、29、31 日且为周一 09:00",
++  );
+ });
+diff --git a/tests/status-org-presence.test.ts b/tests/status-org-presence.test.ts
+new file mode 100644
+index 0000000..0d6a2b6
+--- /dev/null
++++ b/tests/status-org-presence.test.ts
+@@ -0,0 +1,42 @@
++// Background steps must not look like duplicate business tasks; grouping must not hide an offline worker or mutate state.
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { render } from "../cli/status.ts";
++
++test("organization workflow is one presence entry while unavailable stages remain visible", () => {
++  const state = {
++    now: "2026-11-13T11:00:00.000Z",
++    timezone: "Asia/Shanghai",
++    spending: {
++      today: { rounds: 0, tokens: 0, cost: 0, missingTokens: 0, missingCost: 0 },
++      week: { rounds: 0, tokens: 0, cost: 0, missingTokens: 0, missingCost: 0 },
++    },
++    totals: { running: 0, queued: 0, retrying: 0, unknown: 0, doneToday: 0 },
++    agents: [
++      { id: "codex", name: "Codex", worker: "mac", online: true },
++      { id: "org-notify-script", name: "组织优化 · 脚本发送提醒", worker: "mac", online: true },
++      { id: "org-rollup-script", name: "组织优化 · 脚本线下汇总", worker: "mac", online: true },
++    ],
++    channels: [],
++    sources: [],
++    lines: [],
++    elsewhere: [],
++    cards: [],
++    recentCards: [],
++    runs: [],
++    unrouted: [],
++  };
++  const original = structuredClone(state);
++  const text = render(state, { color: false });
++  assert.match(text, /● 组织优化每日流程/);
++  assert.match(text, /2\/2 个步骤在线/);
++  assert.doesNotMatch(text, /● 组织优化 ·/);
++  assert.match(text, /● Codex/);
++  assert.match(text, /status --json/);
++  assert.deepEqual(state, original);
++  state.agents[2].online = false;
++  const partial = render(state, { color: false });
++  assert.match(partial, /○ 组织优化每日流程/);
++  assert.match(partial, /1\/2 个步骤在线/);
++  assert.match(partial, /组织优化 · 脚本线下汇总.*离线/);
++});
+diff --git a/tests/status-org-schedule.test.ts b/tests/status-org-schedule.test.ts
+new file mode 100644
+index 0000000..4b6dc3a
+--- /dev/null
++++ b/tests/status-org-schedule.test.ts
+@@ -0,0 +1,36 @@
++// A daily calendar check must not be presented as a weekend business execution.
++// The display must retain makeup workdays and fail closed at an unknown calendar year.
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { orgScheduleDisplay } from "../cli/org-schedule.ts";
++const row = (next: string, agent = "org-morning-gate") => ({ agent, every: "每天 10:30", next });
++const workday = (date: string): boolean | null => {
++  if (date.startsWith("2028")) return null;
++  if (date === "2026-10-10") return true;
++  if (date >= "2026-10-01" && date <= "2026-10-07") return false;
++  if (date >= "2027-01-01" && date <= "2027-01-03") return false;
++  return ![0, 6].includes(new Date(date + "T12:00:00Z").getUTCDay());
++};
++test("weekend polling is displayed as the next business day without changing the raw state", () => {
++  const state = { lines: [row("2026-11-14T02:30:00.000Z"), row("2026-11-14T02:30:00.000Z", "other")] };
++  const shown = orgScheduleDisplay(state, workday);
++  assert.equal(shown.lines[0].next, "2026-11-16T02:30:00.000Z");
++  assert.equal(shown.lines[0].every, "工作日 10:30（含调休）");
++  assert.equal(state.lines[0].next, "2026-11-14T02:30:00.000Z");
++  assert.equal(shown.lines[1], state.lines[1]);
++});
++test("makeup Saturday and cross-year holidays share the gate calendar", () => {
++  assert.equal(
++    orgScheduleDisplay({ lines: [row("2026-10-10T02:30:00.000Z")] }, workday).lines[0].next,
++    "2026-10-10T02:30:00.000Z",
++  );
++  assert.equal(
++    orgScheduleDisplay({ lines: [row("2027-01-01T02:30:00.000Z")] }, workday).lines[0].next,
++    "2027-01-04T02:30:00.000Z",
++  );
++});
++test("missing calendar does not invent a business execution date", () => {
++  const shown = orgScheduleDisplay({ lines: [row("2028-01-01T02:30:00.000Z")] }, workday);
++  assert.equal(shown.lines[0].next, null);
++  assert.equal("nextLabel" in shown.lines[0] && shown.lines[0].nextLabel, "未知，工作日日历待维护");
++});
+diff --git a/tests/status-view.test.ts b/tests/status-view.test.ts
+index 6bec833..f7297b0 100644
+--- a/tests/status-view.test.ts
++++ b/tests/status-view.test.ts
+@@ -2,6 +2,7 @@
+ // Agent reading the output, or show up despite NO_COLOR; a Chinese, Japanese or Korean character is counted as one column,
+ // so columns after it drift and lines wrap past the edge; what waits for the owner sinks below what only reports; a
+ // notice dealt with spreads its whole text over the list, or loses it, though that's the only place what `tell` said is read.
++// One long schedule pushes every other schedule past the terminal edge.
+ // A paused rule doesn't say how many events it has let go by since when, which ones, or that there are more than it lists,
+ // or prints one of them wider than the terminal.
+ // The replay command it prints, copied as it is, runs something else: a rule name with $ or a backquote expands, one
+@@ -204,3 +205,17 @@ test("on Windows the replay command quotes the way PowerShell reads single quote
+   assert.equal(replayCommand("‘羊毛’; rm x", since, true), `agent-autoloop replay '‘‘羊毛’’; rm x' --since ${since}`);
+   assert.equal(replayCommand("‚a‛", since, true), `agent-autoloop replay '‚‚a‛‛' --since ${since}`);
+ });
++
++test("long schedules wrap without widening the other rows", () => {
++  const every =
++    "工作日 9 至 17 时，每小时第 " + Array.from({ length: 30 }, (_, i) => String(2 * i + 1)).join("、") + " 分钟";
++  const output = render(
++    { ...state, lines: [...state.lines, { name: "长定时", every, next: state.lines[0].next }] },
++    { color: false, columns: 80 },
++  );
++  const section = output.split("\n定时\n")[1].split("\n\n")[0];
++  assert.ok(section.split("\n").every((line) => width(line) <= 80));
++  assert.match(section, /早报.*每天 9:00.*下次/);
++  assert.match(section, /每小时第/);
++  assert.match(section, /59 分钟/);
++});
