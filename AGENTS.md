@@ -2,6 +2,10 @@
 
 先读 [docs/protocol.md](docs/protocol.md) 和 [架构图](docs/architecture.svg)：它们说明最终实现。
 
+## Fork 提交流程
+
+我们自己的改动直接提交并推送到 `is-test88/agent-autoloop` 的 `main`，不为这些改动创建独立分支或向上游开 PR。已关闭的上游 PR #295 保持关闭。
+
 ## 原则
 
 - **内核只收、只分、只派、只记。** `kernel/` 不主动连接任何东西，不知道任何产品的名字。`tests/purity.test.ts` 守着这几条，也守着 host、protocol、worker 不认识具体产品。新的产品、新的连接方式都是外面的插件。
