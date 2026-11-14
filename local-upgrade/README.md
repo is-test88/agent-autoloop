@@ -15,7 +15,7 @@
 需要 macOS、Git、Node.js 24+ 和 Python 3.10+，并让 `~/.local/bin` 位于 PATH。以下以干净的官方 v1.8.4 为起点。在新 Mac 准备好独立迁移的配置和插件之前，先保持服务关闭。
 
 ```sh
-git clone --branch codex/local-upgrade-kit https://github.com/is-test88/agent-autoloop.git agent-autoloop-kit
+git clone --branch main https://github.com/is-test88/agent-autoloop.git agent-autoloop-kit
 mkdir -p ~/.agent-autoloop
 chmod 700 ~/.agent-autoloop
 git clone --depth 1 --branch v1.8.4 https://github.com/KKKKhazix/agent-autoloop.git ~/.agent-autoloop/app
