@@ -1,10 +1,12 @@
-"""Run the real upgrade transaction twice against disposable launchd services."""
+"""Run the real upgrade transaction twice against disposable child processes."""
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import signal
+import time
 import subprocess
 import tempfile
 import urllib.request
@@ -48,8 +50,8 @@ def rehearse(updater, tag):
     try:
         with tempfile.TemporaryDirectory(prefix='autoloop-upgrade-drill-') as folder:
             root = Path(folder).resolve()
-            exercise(updater, root / 'success', source, prod, service, tag, fail=False)
-            exercise(updater, root / 'rollback', source, prod, service, tag, fail=True)
+            exercise(updater, root / 'success', source, prod, tag, fail=False)
+            exercise(updater, root / 'rollback', source, prod, tag, fail=True)
     finally:
         if fingerprint(updater, prod, service) != before:
             raise RuntimeError('演练期间检测到生产服务 PID、版本或配置变化')
@@ -67,11 +69,67 @@ def verify_help_and_skill(updater, home, phase):
     assert len(expected_rows) == 3 and section.splitlines() == expected_rows, '帮助缺少升级命令或说明'
     skill = (home / 'app/skills/agent-autoloop/SKILL.md').read_text()
     expected_skill = (updater.HERE / 'skill-upgrade.md').read_text().strip()
-    assert skill.count(expected_skill) == 1, 'Skill 的升级说明缺失或重复'
-    print(f'{phase}：--help 和 Skill 中的三条升级说明均已核对。', flush=True)
+    assert skill.count(expected_skill) == 1, 'Skill 的升级说明或 Fork 提交流程缺失、变化或重复'
+    print(f'{phase}：--help 和 Skill 中的三条升级说明及 Fork 提交流程均已核对。', flush=True)
 
 
-def exercise(updater, home, source, prod, production_service, tag, *, fail):
+class DrillProcess:
+    def __init__(self, updater, home, app):
+        self.updater, self.home, self.app = updater, home, app
+        self.child = None
+
+    def start(self):
+        if self.child is not None:
+            raise RuntimeError('演练进程尚未清理')
+        env = {**os.environ, 'AGENT_AUTOLOOP_HOME': str(self.home),
+               'AGENT_AUTOLOOP_RULES': str(self.home / 'rules.json')}
+        url = json.loads((self.home / 'config.json').read_text())['url']
+        with (self.home / 'drill.log').open('ab') as log:
+            self.child = subprocess.Popen(
+                [self.updater.NODE, self.app / 'bin/agent-autoloop.ts', 'up'],
+                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+            )
+        for _ in range(100):
+            if self.child.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(url + '/healthz', timeout=1) as response:
+                    ready = json.load(response).get('ok') is True
+                # Check the pid written by the process, so another listener cannot pass.
+                if ready and int((self.home / 'up.pid').read_text()) == self.child.pid:
+                    return
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
+        print((self.home / 'drill.log').read_text()[-2500:], flush=True)
+        raise RuntimeError('隔离进程未通过启动检查')
+
+    def stop(self):
+        if self.child is None:
+            return
+        child = self.child
+        group = child.pid
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        for attempt in range(100):
+            child.poll()
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                self.child = None
+                return
+            if attempt == 49:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            time.sleep(0.1)
+        raise RuntimeError(f'隔离进程组尚未退出：{group}')
+
+
+def exercise(updater, home, source, prod, tag, *, fail):
     from verify import install_upgrade_skill, verify_candidate
 
     home = home / '.agent-autoloop'
@@ -88,13 +146,10 @@ def exercise(updater, home, source, prod, production_service, tag, *, fail):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
-    label = 'agent-autoloop-' + hashlib.sha256(str(home).encode()).hexdigest()[:8]
-    isolated_service = production_service.rsplit('/', 1)[0] + '/' + label
-    assert isolated_service != production_service and not home.is_relative_to(prod)
-    if subprocess.run(['launchctl', 'print', isolated_service], capture_output=True).returncode == 0:
-        raise RuntimeError('隔离服务标识已被占用')
-    saved = updater.HOME, updater.APP, updater.SERVICE, updater.validate
-    updater.HOME, updater.APP, updater.SERVICE = home, app, isolated_service
+    assert not home.is_relative_to(prod)
+    process = DrillProcess(updater, home, app)
+    saved = updater.HOME, updater.APP, updater.validate
+    updater.HOME, updater.APP = home, app
     updater.validate = lambda stage: verify_candidate(
         stage, prod, updater.HERE, updater.NODE,
         lambda candidate, *args: updater.cli(candidate, *args, home=prod), updater.run,
@@ -123,10 +178,10 @@ def exercise(updater, home, source, prod, production_service, tag, *, fail):
         rules['rules'] = [{'name': '隔离演练定时', 'when': {'cron': '*/10 * * * *'},
                            'to': next(iter(rules['agents'])), 'cwd': str(home), 'tell': 'never'}]
         rules_file.write_text(json.dumps(rules))
-        updater.cli(app, 'service', 'install')
+        process.start()
         verify_help_and_skill(updater, home, '切换前')
         try:
-            updater.upgrade(tag, after_switch=checked)
+            updater.upgrade(tag, after_switch=checked, process=process)
         except InjectedFailure:
             assert fail and seen
             assert updater.git(app, 'rev-parse', 'HEAD') == original
@@ -141,9 +196,6 @@ def exercise(updater, home, source, prod, production_service, tag, *, fail):
         assert (backup / 'state/hub.db').is_file()
     finally:
         try:
-            if subprocess.run(['launchctl', 'print', isolated_service], capture_output=True).returncode == 0:
-                updater.cli(app, 'service', 'remove')
-            if subprocess.run(['launchctl', 'print', isolated_service], capture_output=True).returncode == 0:
-                raise RuntimeError(f'隔离服务尚未清理：{isolated_service}')
+            process.stop()
         finally:
-            updater.HOME, updater.APP, updater.SERVICE, updater.validate = saved
+            updater.HOME, updater.APP, updater.validate = saved

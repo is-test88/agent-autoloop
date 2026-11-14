@@ -83,7 +83,7 @@ def state(app):
     return json.loads(cli(app, 'status', '--json', capture=True))
 
 
-def verify_live(app, expected, baseline, local_display=True):
+def verify_live(app, expected, baseline, local_display=True, managed=True):
     url = json.loads((HOME / 'config.json').read_text())['url']
     for _ in range(30):
         try:
@@ -93,7 +93,8 @@ def verify_live(app, expected, baseline, local_display=True):
             online = lambda data, key: {item['name'] for item in data[key] if item['online']}
             if (health.get('ok') is True and health.get('commit') == expected
                 and all(online(baseline, key) <= online(current, key) for key in ('agents', 'channels'))):
-                cli(app, 'doctor')
+                if managed:
+                    cli(app, 'doctor')
                 if not local_display:
                     return
                 display = cli(app, 'status', capture=True).decode()
@@ -152,7 +153,7 @@ def main():
             upgrade(tag, check=args.check)
 
 
-def upgrade(tag, *, check=False, after_switch=None):
+def upgrade(tag, *, check=False, after_switch=None, process=None):
     print(f'验证正式版 {tag} 与本地改动。', flush=True)
     with tempfile.TemporaryDirectory(prefix='.upgrade-', dir=HOME) as folder:
         stage = Path(folder) / 'app'
@@ -179,7 +180,7 @@ def upgrade(tag, *, check=False, after_switch=None):
         def verify():
             if digest != config_digest():
                 raise RuntimeError('切换期间本机配置有变化')
-            verify_live(APP, expected, baseline, local_display=after_switch is None)
+            verify_live(APP, expected, baseline, local_display=after_switch is None, managed=process is None)
             if after_switch is not None:
                 after_switch(expected)
         def stop():
@@ -188,8 +189,10 @@ def upgrade(tag, *, check=False, after_switch=None):
         baseline = state(APP)
         if baseline['totals']['running'] or baseline['totals']['queued']:
             raise RuntimeError('备份期间有新任务，等服务空闲后重试')
-        switch(stage, backup, stop, lambda: cli(APP, 'service', 'install'), verify,
-               lambda: verify_live(APP, previous, baseline, local_display=False))
+        stop_current = process.stop if process else stop
+        start_current = process.start if process else lambda: cli(APP, 'service', 'install')
+        switch(stage, backup, stop_current, start_current, verify,
+               lambda: verify_live(APP, previous, baseline, local_display=False, managed=process is None))
         cli(APP, '--version')
         print(f'升级和验证完成。原安装保存在 {backup}')
 
