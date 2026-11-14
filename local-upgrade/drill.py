@@ -25,6 +25,52 @@ def fingerprint(updater, home, service):
     return pid, health, updater.config_digest()
 
 
+def background_items(raw):
+    # Last Use, generation and notification flags change as existing apps run.
+    fields = {'UUID', 'Identifier', 'URL', 'Executable Path', 'Type'}
+    uid, items = None, set()
+    for block in raw.split('\n\n'):
+        for line in block.splitlines():
+            if line.startswith(' Records for UID '):
+                uid = line.split(':', 1)[0].strip()
+        record = dict(line.strip().split(': ', 1) for line in block.splitlines() if ': ' in line)
+        if 'UUID' in record and 'Identifier' in record:
+            items.add((uid, tuple(sorted((key, record[key]) for key in fields if key in record))))
+    if not items or any(uid is None for uid, _ in items):
+        raise RuntimeError('无法读取 macOS 后台活动登记')
+    return items
+
+
+def startup_snapshot(updater):
+    items = background_items(updater.run('/usr/bin/sfltool', 'dumpbtm', capture=True).decode())
+    directories = (Path.home() / 'Library/LaunchAgents', Path('/Library/LaunchAgents'),
+                   Path('/Library/LaunchDaemons'))
+    files = {(str(path), hashlib.sha256(path.read_bytes()).hexdigest())
+             for directory in directories for path in directory.glob('*.plist')}
+    return items, files
+
+
+def verify_cleanup(updater, root, before, prod, service, production):
+    failures = []
+    try:
+        items, files = startup_snapshot(updater)
+        old_items, old_files = before
+        for label, old, new in (('后台活动登记', old_items, items), ('启动配置', old_files, files)):
+            if old != new:
+                failures.append(f'{label}有变化（新增或变更 {len(new - old)}，移除或变更 {len(old - new)}）')
+    except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as error:
+        failures.append(f'无法核对后台活动和启动配置：{error}')
+    processes = updater.run('/bin/ps', '-axww', '-o', 'pid=,command=', capture=True).decode(errors='replace')
+    remaining = [line.split()[0] for line in processes.splitlines() if str(root) + '/' in line]
+    if remaining:
+        failures.append(f'演练进程残留：{", ".join(remaining)}')
+    if fingerprint(updater, prod, service) != production:
+        failures.append('生产服务 PID、健康版本或配置发生变化')
+    if failures:
+        raise RuntimeError('演练清理检查失败：' + '；'.join(failures))
+    print('后台活动登记及启动配置一致，无残留演练进程。生产服务 PID、健康版本及配置校验值一致。', flush=True)
+
+
 def installed_tag(updater, app):
     return updater.git(app, 'describe', '--tags', '--exact-match', 'HEAD').decode().strip()
 
@@ -45,17 +91,18 @@ def rehearse(updater, tag):
                 continue
         else:
             print('没有旧版备份，本次使用同版本的隔离副本演练切换与回滚。', flush=True)
-    before = fingerprint(updater, prod, service)
+    production = fingerprint(updater, prod, service)
+    before = startup_snapshot(updater)
     print(f'隔离演练 {installed_tag(updater, source)} → {tag}', flush=True)
+    root = None
     try:
         with tempfile.TemporaryDirectory(prefix='autoloop-upgrade-drill-') as folder:
             root = Path(folder).resolve()
             exercise(updater, root / 'success', source, prod, tag, fail=False)
             exercise(updater, root / 'rollback', source, prod, tag, fail=True)
     finally:
-        if fingerprint(updater, prod, service) != before:
-            raise RuntimeError('演练期间检测到生产服务 PID、版本或配置变化')
-        print('生产服务 PID、健康版本及配置校验值一致。', flush=True)
+        if root is not None:
+            verify_cleanup(updater, root, before, prod, service, production)
 
 
 def verify_help_and_skill(updater, home, phase):
