@@ -9,7 +9,7 @@ import { hubClient } from "../protocol/client.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { checkBackgroundLaunch } from "../host/background-launch.ts";
 import { CONFIG_FILE, readConfig, writeConfig, type Config } from "../host/config.ts";
-import { HOME, RULES_FILE } from "../host/home.ts";
+import { DEFAULT_TASK_CWD, HOME, RULES_FILE } from "../host/home.ts";
 import { findOnPath, psQuote } from "../host/command.ts";
 import { privateDirectory } from "../host/files.ts";
 import {
@@ -672,7 +672,9 @@ function checkRulesFile(file: string) {
   } catch (error) {
     throw new Error(`读不到 ${file}：${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
   }
-  return checkBackgroundLaunch(parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone));
+  return checkBackgroundLaunch(
+    parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone, DEFAULT_TASK_CWD),
+  );
 }
 
 function check(args: string[]) {

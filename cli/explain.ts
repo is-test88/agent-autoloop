@@ -1,6 +1,8 @@
 // `rules explain` and `emit --dry-run`: what this machine's rules file says, without asking a hub or writing a fact.
 import { describeCron, nextRun, parseCron } from "../kernel/cron.ts";
 import { cronOf, eventRule, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
+import { DEFAULT_TASK_CWD } from "../host/home.ts";
+import { checkBackgroundLaunch } from "../host/background-launch.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { parseEvent } from "../protocol/validate.ts";
 
@@ -31,7 +33,7 @@ function details(rule: Rule, rules: Rules, now: number) {
 
 /** The rules as this machine would run them, one line per thing an owner asks about. */
 export function explainRules(text: string, now = Date.now(), zone = localZone()): string[] {
-  const rules = parseRules(text, now, zone);
+  const rules = checkBackgroundLaunch(parseRules(text, now, zone, DEFAULT_TASK_CWD));
   const lines = [
     `时区 ${rules.timezone}；先问你：${rules.askFirst.join("、")}；${rules.rules.length} 条规则`,
     `来源：${Object.entries(rules.sources)
@@ -71,7 +73,7 @@ export function previewEvent(
   now = Date.now(),
   zone = localZone(),
 ): string[] {
-  const rules = parseRules(text, now, zone);
+  const rules = checkBackgroundLaunch(parseRules(text, now, zone, DEFAULT_TASK_CWD));
   const parsed = parseEvent(event);
   const lines = [`事件：${source} ${parsed.type}${parsed.subject ? ` ${parsed.subject}` : ""}`];
   if (!rules.sources[source]) lines.push(`来源 ${source} 没有登记在 rules.json 的 sources 里`);

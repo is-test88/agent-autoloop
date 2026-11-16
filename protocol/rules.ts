@@ -122,7 +122,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
   rule.tell ??= "needed";
 }
 
-export function parseRules(json: string, now: number, timezone: string): Rules {
+export function parseRules(json: string, now: number, timezone: string, defaultCwd?: string): Rules {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -185,7 +185,10 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     if (isObject(agent)) agent.access ??= "edit";
   }
   const names = new Set<string>();
-  for (const rule of rules.rules) checkRule(issues, rules, rule, names, now);
+  for (const rule of rules.rules) {
+    if (defaultCwd !== undefined && isObject(rule) && !("cwd" in rule)) Object.assign(rule, { cwd: defaultCwd });
+    checkRule(issues, rules, rule, names, now);
+  }
   if (issues.length) throw new RulesError(issues);
   const limits = new Map<string, number | undefined>();
   for (const { group, parallel } of rules.rules) {

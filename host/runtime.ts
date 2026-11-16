@@ -1,10 +1,10 @@
 // The hub on this machine: its database, the view kept from the log, the rules file, and one way to apply an input.
 // Importing this opens them all, which is why the checks that must survive a bad rules file import it late.
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { HOME, RULES_FILE } from "./home.ts";
+import { DEFAULT_TASK_CWD, HOME, RULES_FILE } from "./home.ts";
 import { privateDirectory } from "./files.ts";
 import { skippedOf, stateOf as state, viewStatements } from "./state.ts";
 import { cardHash, digest, whose as keyHolder } from "../kernel/credentials.ts";
@@ -95,7 +95,7 @@ export function execute(type: string, args: any[], now = Date.now()) {
 }
 
 export const parseRules = (json: string, now = Date.now()) =>
-  checkBackgroundLaunch(checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone));
+  checkBackgroundLaunch(checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone, DEFAULT_TASK_CWD));
 export let rules = query.configuration(current);
 
 export function reloadRules(file = RULES_FILE): { problem?: string } {
@@ -107,6 +107,9 @@ export function reloadRules(file = RULES_FILE): { problem?: string } {
   }
   try {
     const next = parseRules(text);
+    if (next.rules.some((rule) => rule.cwd === DEFAULT_TASK_CWD)) {
+      mkdirSync(DEFAULT_TASK_CWD, { recursive: true, mode: 0o700 });
+    }
     const differs = JSON.stringify(next) !== JSON.stringify(query.configuration(getView()));
     const reportedBroken = (card: Row) => card.key.startsWith("rules:") && card.state === "open";
     if (differs || rows(current, "cards", { state: "open" }).some(reportedBroken)) execute("rules", [next]);

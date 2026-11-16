@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { validateBackgroundLaunch } from "../host/background-launch.ts";
+import { parseRules } from "../protocol/rules.ts";
 
 test("generic startup validation covers new rules, aliases, and script arguments", () => {
   const home = mkdtempSync(join(tmpdir(), "startup-test-"));
@@ -27,4 +28,17 @@ test("generic startup validation covers new rules, aliases, and script arguments
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("only an omitted working directory uses the installation default", () => {
+  const config = (cwd?: string) =>
+    JSON.stringify({
+      sources: {},
+      agents: { worker: { name: "Worker", worker: "mac", use: "command", command: ["pwd"] } },
+      rules: [{ name: "new task", to: "worker", when: { cron: "0 9 * * *" }, cwd }],
+    });
+  const read = (cwd?: string) => parseRules(config(cwd), 0, "UTC", "/install/work").rules[0].cwd;
+  assert.equal(read(), "/install/work");
+  assert.equal(read("/explicit"), "/explicit");
+  assert.throws(() => read(""), /cwd/);
 });

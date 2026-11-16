@@ -3,4 +3,5 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 export const HOME = path.resolve(process.env.AGENT_AUTOLOOP_HOME ?? path.join(homedir(), ".agent-autoloop"));
+export const DEFAULT_TASK_CWD = path.join(HOME, "work");
 export const RULES_FILE = path.resolve(process.env.AGENT_AUTOLOOP_RULES ?? path.join(HOME, "rules.json"));

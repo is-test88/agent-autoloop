@@ -104,8 +104,8 @@ test("a mistake says which rule and what is wrong", () => {
     r.rules[0].tell = "sometimes";
   }, /规则「意见」.*tell/);
   problem((r) => {
-    delete r.rules[0].cwd;
-  }, /规则「意见」缺少 cwd/);
+    r.rules[0].cwd = null;
+  }, /规则「意见」.*cwd/);
   problem((r) => {
     r.rules[0].cwd = "relative/path";
   }, /规则「意见」.*cwd/);

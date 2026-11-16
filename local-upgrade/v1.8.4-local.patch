@@ -1,15 +1,49 @@
+diff --git a/cli/explain.ts b/cli/explain.ts
+index cd78c3f..270b394 100644
+--- a/cli/explain.ts
++++ b/cli/explain.ts
+@@ -1,6 +1,8 @@
+ // `rules explain` and `emit --dry-run`: what this machine's rules file says, without asking a hub or writing a fact.
+ import { describeCron, nextRun, parseCron } from "../kernel/cron.ts";
+ import { cronOf, eventRule, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
++import { DEFAULT_TASK_CWD } from "../host/home.ts";
++import { checkBackgroundLaunch } from "../host/background-launch.ts";
+ import { parseRules } from "../protocol/rules.ts";
+ import { parseEvent } from "../protocol/validate.ts";
+ 
+@@ -31,7 +33,7 @@ function details(rule: Rule, rules: Rules, now: number) {
+ 
+ /** The rules as this machine would run them, one line per thing an owner asks about. */
+ export function explainRules(text: string, now = Date.now(), zone = localZone()): string[] {
+-  const rules = parseRules(text, now, zone);
++  const rules = checkBackgroundLaunch(parseRules(text, now, zone, DEFAULT_TASK_CWD));
+   const lines = [
+     `时区 ${rules.timezone}；先问你：${rules.askFirst.join("、")}；${rules.rules.length} 条规则`,
+     `来源：${Object.entries(rules.sources)
+@@ -71,7 +73,7 @@ export function previewEvent(
+   now = Date.now(),
+   zone = localZone(),
+ ): string[] {
+-  const rules = parseRules(text, now, zone);
++  const rules = checkBackgroundLaunch(parseRules(text, now, zone, DEFAULT_TASK_CWD));
+   const parsed = parseEvent(event);
+   const lines = [`事件：${source} ${parsed.type}${parsed.subject ? ` ${parsed.subject}` : ""}`];
+   if (!rules.sources[source]) lines.push(`来源 ${source} 没有登记在 rules.json 的 sources 里`);
 diff --git a/cli/main.ts b/cli/main.ts
-index 8624663..efcd1d8 100644
+index 8624663..8d7056e 100644
 --- a/cli/main.ts
 +++ b/cli/main.ts
-@@ -7,6 +7,7 @@ import path from "node:path";
+@@ -7,8 +7,9 @@ import path from "node:path";
  import { createInterface } from "node:readline/promises";
  import { hubClient } from "../protocol/client.ts";
  import { parseRules } from "../protocol/rules.ts";
 +import { checkBackgroundLaunch } from "../host/background-launch.ts";
  import { CONFIG_FILE, readConfig, writeConfig, type Config } from "../host/config.ts";
- import { HOME, RULES_FILE } from "../host/home.ts";
+-import { HOME, RULES_FILE } from "../host/home.ts";
++import { DEFAULT_TASK_CWD, HOME, RULES_FILE } from "../host/home.ts";
  import { findOnPath, psQuote } from "../host/command.ts";
+ import { privateDirectory } from "../host/files.ts";
+ import {
 @@ -25,6 +26,7 @@ import {
  } from "../host/service.ts";
  import { versionLine } from "../host/version.ts";
@@ -32,12 +66,14 @@ index 8624663..efcd1d8 100644
  }
  
  async function runs(args: string[]) {
-@@ -664,7 +671,7 @@ function checkRulesFile(file: string) {
+@@ -664,7 +671,9 @@ function checkRulesFile(file: string) {
    } catch (error) {
      throw new Error(`读不到 ${file}：${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
    }
 -  return parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
-+  return checkBackgroundLaunch(parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone));
++  return checkBackgroundLaunch(
++    parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone, DEFAULT_TASK_CWD),
++  );
  }
  
  function check(args: string[]) {
@@ -215,6 +251,19 @@ index bf0cfb7..1961bbc 100644
    }
  
    const unrouted = state.unrouted.slice(0, 5);
+diff --git a/docs/protocol.md b/docs/protocol.md
+index 008bbce..f654780 100644
+--- a/docs/protocol.md
++++ b/docs/protocol.md
+@@ -102,6 +102,8 @@
+ 
+ `cwd` 由接单电脑解释，可用 Unix 绝对路径、Windows 盘符或 UNC 路径、`~/` 或 `~\` 开头的家目录路径；中台与接单电脑可以用不同操作系统。接受 Windows 路径是兼容的能力扩展，原有 `/v1`、规则与插件用法不变。
+ 
++中台执行的规则可以省略 `cwd`，此时使用该安装的数据目录下的 `work/`（默认 `~/.agent-autoloop/work/`）。显式填写时使用任务指定的目录。分机接单且需要自己的项目目录时应显式填写。
++
+ `elsewhere` 是在别处定时跑的任务：中台不启动它们，只在 `agent-autoloop status` 里列出来，它们要找你时用 `POST /v1/tell`。写了 `cwd`（还要写 `skill` 或 `prompt`）的也能问你：卡片带选项，你答了，中台像规则的一轮那样叫醒 `to`，在 `cwd` 照 `skill`、`prompt` 接着做，这一轮的组就是任务名，一次一轮，不接定时任务自己的会话。规则写错了，文件改动不生效，旧规则继续跑，并推一张卡片告诉你错在哪。可以给它写上 `model` 和 `effort`，也就是应用里给这个任务设的模型和推理强度：中台不用它们启动任何东西，只随 `GET /v1/state` 的 `elsewhere` 带出来，给显示这些任务的客户端用；没写就不带。这是兼容的扩展，原有规则文件不用改。
+ 
+ 写了 `resume`，一轮开始时如果事项的上一轮做完了（包括没事可做）、留下了会话，就接着那个会话；会话越接越长，Token 和费用也会跟着涨。这几种情况开新会话：上一轮被停掉了（你停的，或连续失败停下的），接着它多半还是同样的结果；上一轮是别的 Agent 跑的；上一轮没有会话。没写 `parallel` 时整条规则是一个事项，所有事件接同一个会话；事件不带 `subject` 时也都算同一个事项。回答和到期的复查在 Agent 没变时回到提问和约定时的会话，重派的也留在自己的会话。复查的旧日志若没有记录会话所属 Agent，会保留复查资料，不强行沿用旧会话，仍按 resume 规则决定是否续接当前 Agent 最近的会话。
 diff --git a/host/background-launch.ts b/host/background-launch.ts
 new file mode 100644
 index 0000000..efd7f38
@@ -274,10 +323,33 @@ index 0000000..efd7f38
 +  if (process.platform === "darwin") validateBackgroundLaunch(rules, homedir());
 +  return rules;
 +}
+diff --git a/host/home.ts b/host/home.ts
+index 98c7998..aa214b6 100644
+--- a/host/home.ts
++++ b/host/home.ts
+@@ -3,4 +3,5 @@ import { homedir } from "node:os";
+ import path from "node:path";
+ 
+ export const HOME = path.resolve(process.env.AGENT_AUTOLOOP_HOME ?? path.join(homedir(), ".agent-autoloop"));
++export const DEFAULT_TASK_CWD = path.join(HOME, "work");
+ export const RULES_FILE = path.resolve(process.env.AGENT_AUTOLOOP_RULES ?? path.join(HOME, "rules.json"));
 diff --git a/host/runtime.ts b/host/runtime.ts
-index 3079092..641aedb 100644
+index 3079092..fa3623d 100644
 --- a/host/runtime.ts
 +++ b/host/runtime.ts
+@@ -1,10 +1,10 @@
+ // The hub on this machine: its database, the view kept from the log, the rules file, and one way to apply an input.
+ // Importing this opens them all, which is why the checks that must survive a bad rules file import it late.
+ import { randomBytes } from "node:crypto";
+-import { existsSync, readFileSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { join } from "node:path";
+ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+-import { HOME, RULES_FILE } from "./home.ts";
++import { DEFAULT_TASK_CWD, HOME, RULES_FILE } from "./home.ts";
+ import { privateDirectory } from "./files.ts";
+ import { skippedOf, stateOf as state, viewStatements } from "./state.ts";
+ import { cardHash, digest, whose as keyHolder } from "../kernel/credentials.ts";
 @@ -14,6 +14,7 @@ import { initialize, rows, statement, type Fact, type Row, type Table } from "..
  import * as query from "../kernel/query.ts";
  import { commitLatest, openView } from "../kernel/store.ts";
@@ -291,10 +363,20 @@ index 3079092..641aedb 100644
  
  export const parseRules = (json: string, now = Date.now()) =>
 -  checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone);
-+  checkBackgroundLaunch(checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone));
++  checkBackgroundLaunch(checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone, DEFAULT_TASK_CWD));
  export let rules = query.configuration(current);
  
  export function reloadRules(file = RULES_FILE): { problem?: string } {
+@@ -106,6 +107,9 @@ export function reloadRules(file = RULES_FILE): { problem?: string } {
+   }
+   try {
+     const next = parseRules(text);
++    if (next.rules.some((rule) => rule.cwd === DEFAULT_TASK_CWD)) {
++      mkdirSync(DEFAULT_TASK_CWD, { recursive: true, mode: 0o700 });
++    }
+     const differs = JSON.stringify(next) !== JSON.stringify(query.configuration(getView()));
+     const reportedBroken = (card: Row) => card.key.startsWith("rules:") && card.state === "open";
+     if (differs || rows(current, "cards", { state: "open" }).some(reportedBroken)) execute("rules", [next]);
 diff --git a/kernel/cron.ts b/kernel/cron.ts
 index 44819d4..cde9e28 100644
 --- a/kernel/cron.ts
@@ -374,8 +456,33 @@ index 44819d4..cde9e28 100644
 +  if (hours.length < 24) return `${calendar} ${ranges(hours)} 时，${withinHour}`;
 +  return calendar === "每天" ? withinHour : `${calendar}，${withinHour}`;
  }
+diff --git a/protocol/rules.ts b/protocol/rules.ts
+index 5189d00..0ded60b 100644
+--- a/protocol/rules.ts
++++ b/protocol/rules.ts
+@@ -122,7 +122,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
+   rule.tell ??= "needed";
+ }
+ 
+-export function parseRules(json: string, now: number, timezone: string): Rules {
++export function parseRules(json: string, now: number, timezone: string, defaultCwd?: string): Rules {
+   let parsed: unknown;
+   try {
+     parsed = JSON.parse(json);
+@@ -185,7 +185,10 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
+     if (isObject(agent)) agent.access ??= "edit";
+   }
+   const names = new Set<string>();
+-  for (const rule of rules.rules) checkRule(issues, rules, rule, names, now);
++  for (const rule of rules.rules) {
++    if (defaultCwd !== undefined && isObject(rule) && !("cwd" in rule)) Object.assign(rule, { cwd: defaultCwd });
++    checkRule(issues, rules, rule, names, now);
++  }
+   if (issues.length) throw new RulesError(issues);
+   const limits = new Map<string, number | undefined>();
+   for (const { group, parallel } of rules.rules) {
 diff --git a/skills/agent-autoloop/SKILL.md b/skills/agent-autoloop/SKILL.md
-index 1034505..3df9c7a 100644
+index 1034505..3a50ef5 100644
 --- a/skills/agent-autoloop/SKILL.md
 +++ b/skills/agent-autoloop/SKILL.md
 @@ -7,6 +7,14 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
@@ -393,12 +500,21 @@ index 1034505..3df9c7a 100644
  ## 看情况、回答
  
  `agent-autoloop status` 列出谁在线、等用户什么、在做什么、做过什么，还有按完成时间统计的今天和最近 7 天的轮数、Token 和费用（Token 含缓存，写出其中缓存占多少；同一轮重试的已报用量相加，没上报的轮数会写出来）。终端里它带颜色，接管道、被 Agent 调用或设了 `NO_COLOR` 时是纯文本。`agent-autoloop status --json` 输出 `/v1/state` 的原样结构，给脚本和看板用。`agent-autoloop answer <卡片> <序号>` 回答，`agent-autoloop resolve <卡片> <结果>` 结案，`agent-autoloop stop <第几轮>` 停掉一轮，等整个进程组退出才报告已停。
+@@ -19,6 +27,8 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
+ 
+ 改 `rules.json`，运行 `agent-autoloop check`。几秒内生效；写错了旧规则继续跑，并推一张卡片说错在哪。`agent-autoloop rules explain [文件]` 列出规则生效的样子和下次定时，`agent-autoloop emit <类型> --dry-run` 预演一条事件会派给谁，两个都只看本机文件（`rules explain` 不写文件时看 `rules.json`），不连接中台。尚未领取的任务在领活时一起更新 Agent、目录和权限；已领取任务的 Job 配置与接单程序保留到这次执行结束。
+ 
++新建后台规则时，省略 `cwd` 即使用该安装下的 `work/`（默认 `~/.agent-autoloop/work/`）。业务依赖特定工作目录时显式填写后台可访问的目录。
++
+ 每条规则回答五个问题：什么事件（`when`），交给谁（`to`），在哪（`cwd`），照什么做（`skill`、`prompt`），要不要告诉用户（`tell`，默认只在有卡片时）。
+ 
+ ```json
 diff --git a/tests/background-launch.test.ts b/tests/background-launch.test.ts
 new file mode 100644
-index 0000000..17f5cc3
+index 0000000..de7ffb0
 --- /dev/null
 +++ b/tests/background-launch.test.ts
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,44 @@
 +// A new or edited rule must not make a macOS background worker start in a protected location.
 +import assert from "node:assert/strict";
 +import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
@@ -406,6 +522,7 @@ index 0000000..17f5cc3
 +import { join } from "node:path";
 +import { test } from "node:test";
 +import { validateBackgroundLaunch } from "../host/background-launch.ts";
++import { parseRules } from "../protocol/rules.ts";
 +
 +test("generic startup validation covers new rules, aliases, and script arguments", () => {
 +  const home = mkdtempSync(join(tmpdir(), "startup-test-"));
@@ -429,6 +546,19 @@ index 0000000..17f5cc3
 +    rmSync(home, { recursive: true, force: true });
 +  }
 +});
++
++test("only an omitted working directory uses the installation default", () => {
++  const config = (cwd?: string) =>
++    JSON.stringify({
++      sources: {},
++      agents: { worker: { name: "Worker", worker: "mac", use: "command", command: ["pwd"] } },
++      rules: [{ name: "new task", to: "worker", when: { cron: "0 9 * * *" }, cwd }],
++    });
++  const read = (cwd?: string) => parseRules(config(cwd), 0, "UTC", "/install/work").rules[0].cwd;
++  assert.equal(read(), "/install/work");
++  assert.equal(read("/explicit"), "/explicit");
++  assert.throws(() => read(""), /cwd/);
++});
 diff --git a/tests/cron.test.ts b/tests/cron.test.ts
 index d75f39d..55a534e 100644
 --- a/tests/cron.test.ts
@@ -450,6 +580,21 @@ index d75f39d..55a534e 100644
 +    "每月 1、3、5、7、9、11、13、15、17、19、21、23、25、27、29、31 日且为周一 09:00",
 +  );
  });
+diff --git a/tests/rules.test.ts b/tests/rules.test.ts
+index 27ffb6e..9cc1ef4 100644
+--- a/tests/rules.test.ts
++++ b/tests/rules.test.ts
+@@ -104,8 +104,8 @@ test("a mistake says which rule and what is wrong", () => {
+     r.rules[0].tell = "sometimes";
+   }, /规则「意见」.*tell/);
+   problem((r) => {
+-    delete r.rules[0].cwd;
+-  }, /规则「意见」缺少 cwd/);
++    r.rules[0].cwd = null;
++  }, /规则「意见」.*cwd/);
+   problem((r) => {
+     r.rules[0].cwd = "relative/path";
+   }, /规则「意见」.*cwd/);
 diff --git a/tests/status-org-presence.test.ts b/tests/status-org-presence.test.ts
 new file mode 100644
 index 0000000..0d6a2b6
