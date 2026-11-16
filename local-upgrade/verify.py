@@ -9,7 +9,7 @@ import sys
 CHECKS = {
     '中文定时显示和组织优化': ('cron.test.ts', 'status-view.test.ts',
                            'status-org-schedule.test.ts', 'status-org-presence.test.ts'),
-    'Gitea': ('gitea-review/poll.test.mjs', 'gitea-review/review-history.test.mjs',
+    'Gitea': ('gitea-review/poll.test.mjs',
               'delivery-shared-source/tests/delivery-gates.test.ts'),
     '美事': ('meishi-review/collect.test.mjs', 'meishi-review/incremental.test.mjs',
            'meishi-review/notification.test.mjs', 'meishi-review/pipeline.test.mjs',
@@ -53,6 +53,8 @@ def verify_candidate(app, home, here, node, cli, run):
     if len(collector) != 2 or Path(collector[1]) != home / 'meishi-review/collect.mjs':
         raise RuntimeError('美事监听没有使用本地 collect.mjs')
     run(*collector, '--check-bridge', env=env)
+
+    run(node, '--test', app / 'tests/gitea-history.test.mjs', app / 'tests/gitea-reviewer.test.mjs', env=env)
 
     for section, files in CHECKS.items():
         print(f'验证 {section}', flush=True)

@@ -30,3 +30,5 @@ agent-autoloop --help
 恢复程序校验官方基底和文件冲突，应用 `v1.9.0-local.patch`，并安装独立的命令入口与 Skill 说明。若已有 app 或升级目录，先在备份中保留现有内容，再用干净目录恢复。恢复程序不启动后台服务。
 
 本仓库只存程序、补丁和说明。另从可信备份恢复 `config.json`、`rules.json`、所需密钥及状态，以及 `plugins/`、`jobs/`、`gitea-review/`、`delivery-shared-source/`、`meishi-review/`、`org-optimization/` 和 `ssc-weekly/`。检查规则和任务脚本中的绝对路径与新机一致，恢复飞书、HR CLI 邮箱和 Codex 所需的授权及依赖。需要历史状态时，使用原机的 `agent-autoloop backup` 与新机的 `agent-autoloop restore`，保护好离线备份。进行实际切换前运行 `agent-autoloop update --check`。服务接通后可运行 `agent-autoloop update --drill` 演练。
+
+如果这台 Mac 启用 Gitea 自定义交付，在恢复本机 Gitea 目录和 Skill 后运行 `python3 -B local-upgrade/gitea-review/install.py`。适配器直接加载安装版的交付审查模块，审查历史留在本机。安装时保留前一版入口，并保留相同命令、模型与深度已完成的审查记录。

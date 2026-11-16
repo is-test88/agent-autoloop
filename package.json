@@ -15,8 +15,8 @@
     "agent-autoloop": "bin/agent-autoloop.ts"
   },
   "scripts": {
-    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
-    "test:quick": "node --disable-warning=ExperimentalWarning --test \"tests/!(simulation).test.ts\"",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts tests/*.test.mjs",
+    "test:quick": "node --disable-warning=ExperimentalWarning --test \"tests/!(simulation).test.ts\" tests/*.test.mjs",
     "typecheck": "tsc -p .",
     "format": "prettier --write \"**/*.{ts,json,yml}\"",
     "format:check": "prettier --check \"**/*.{ts,json,yml}\"",
