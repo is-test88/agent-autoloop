@@ -8,7 +8,7 @@
 
 ## 后台启动目录
 
-在 macOS 上，规则的工作目录和启动入口使用后台可访问的目录（如 `~/.agent-autoloop/jobs/`）。`agent-autoloop check`、运行中的规则重载和升级预检都会检查新建与修改的规则，识别指向「文稿」、桌面或下载目录的符号链接。按原权限读取业务文件的路径可继续保留。检查失败时，把命令入口和运行目录移到后台可访问的位置，校验后再生效。
+在 macOS 上，规则的工作目录和启动入口使用后台可访问的目录。省略 `cwd` 时默认使用 `~/.agent-autoloop/work/`。`agent-autoloop check`、运行中的规则重载和升级预检都会检查新建与修改的规则，识别指向「文稿」、桌面或下载目录的符号链接。按原权限读取业务文件的路径可继续保留。检查失败时，把命令入口和运行目录移到后台可访问的位置，校验后再生效。
 
 ## 升级演练
 
@@ -16,17 +16,17 @@
 
 ## 换 Mac 恢复
 
-需要 macOS、Git、Node.js 24+ 和 Python 3.10+，并让 `~/.local/bin` 位于 PATH。以下以干净的官方 v1.8.4 为起点。在新 Mac 准备好独立迁移的配置和插件之前，先保持服务关闭。
+需要 macOS、Git、Node.js 24+ 和 Python 3.10+，并让 `~/.local/bin` 位于 PATH。以下以干净的官方 v1.9.0 为起点。在新 Mac 准备好独立迁移的配置和插件之前，先保持服务关闭。
 
 ```sh
 git clone --branch main https://github.com/is-test88/agent-autoloop.git agent-autoloop-kit
 mkdir -p ~/.agent-autoloop
 chmod 700 ~/.agent-autoloop
-git clone --depth 1 --branch v1.8.4 https://github.com/KKKKhazix/agent-autoloop.git ~/.agent-autoloop/app
+git clone --depth 1 --branch v1.9.0 https://github.com/KKKKhazix/agent-autoloop.git ~/.agent-autoloop/app
 python3 -B agent-autoloop-kit/local-upgrade/restore.py
 agent-autoloop --help
 ```
 
-恢复程序校验官方基底和文件冲突，应用 `v1.8.4-local.patch`，并安装独立的命令入口与 Skill 说明。若已有 app 或升级目录，先在备份中保留现有内容，再用干净目录恢复。恢复程序不启动后台服务。
+恢复程序校验官方基底和文件冲突，应用 `v1.9.0-local.patch`，并安装独立的命令入口与 Skill 说明。若已有 app 或升级目录，先在备份中保留现有内容，再用干净目录恢复。恢复程序不启动后台服务。
 
 本仓库只存程序、补丁和说明。另从可信备份恢复 `config.json`、`rules.json`、所需密钥及状态，以及 `plugins/`、`jobs/`、`gitea-review/`、`delivery-shared-source/`、`meishi-review/`、`org-optimization/` 和 `ssc-weekly/`。检查规则和任务脚本中的绝对路径与新机一致，恢复飞书、HR CLI 邮箱和 Codex 所需的授权及依赖。需要历史状态时，使用原机的 `agent-autoloop backup` 与新机的 `agent-autoloop restore`，保护好离线备份。进行实际切换前运行 `agent-autoloop update --check`。服务接通后可运行 `agent-autoloop update --drill` 演练。

@@ -119,10 +119,10 @@ export const finished = (run: any) => run.state !== "claimed" && run.state !== "
 /** Finished runs, each its own entry: when it ended, its number, how and its rule, then a line or two of what came of it. */
 export function runRows(state: any, runs: any[], { color, columns }: { color: boolean; columns?: number }) {
   const room = Math.min(columns || 100, 120);
-  const { dim, red, green, yellow } = stylesFor(color);
+  const { dim, red, yellow } = stylesFor(color);
   const { when } = clockFor(state);
   const RUN_LOOK: Record<string, [string, Style]> = {
-    done: ["做完了", green],
+    done: ["本轮已结束", dim],
     nothing: ["没事可做", dim],
     cancelled: ["停了", yellow],
     unknown: ["不确定", red],
@@ -160,6 +160,13 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   };
 
   const { totals } = state;
+  type Timer = { rule: string; lane: string; at: string };
+  const nextChecks = new Map<string, Timer>();
+  for (const timer of (state.timers ?? []) as Timer[]) {
+    const key = JSON.stringify([timer.rule, timer.lane]);
+    const previous = nextChecks.get(key);
+    if (!previous || Date.parse(timer.at) < Date.parse(previous.at)) nextChecks.set(key, timer);
+  }
   const count = (label: string, n: number, style: Style) =>
     n > 0 ? `${label} ${bold(style(String(n)))}` : dim(`${label} 0`);
   say(
@@ -169,23 +176,48 @@ export function render(state: any, { color, columns }: { color: boolean; columns
       count("排队", totals.queued - totals.retrying, yellow),
       totals.retrying ? count("等重派", totals.retrying, yellow) : "",
       totals.unknown ? count("不确定", totals.unknown, red) : "",
-      `今天做完 ${totals.doneToday}`,
+      nextChecks.size ? count("等待复查", nextChecks.size, yellow) + " 项" : "",
+      `今天成功结束 ${totals.doneToday} 轮`,
     ]
       .filter(Boolean)
       .join(dim(" · ")),
   );
   for (const line of spendLines(state.spending)) say(dim(line));
 
-  const presence = [
-    ...state.agents.map((agent: any) => ({ ...agent, where: agent.worker })),
-    ...state.channels.map((channel: any) => ({ ...channel, where: "通道" })),
-  ];
+  // This local workflow has several technical executors but is one business process.
+  // Keep the API/--json state intact and expose unavailable members rather than masking them.
+  const orgSteps = state.agents.filter(
+    (agent: any) => agent.id?.startsWith("org-") && agent.name.startsWith("组织优化 ·"),
+  );
+  const grouped = orgSteps.length > 1;
+  let shownOrg = false;
+  const agents = state.agents.flatMap((agent: any) => {
+    if (!grouped || !orgSteps.includes(agent)) return [{ ...agent, where: agent.worker }];
+    if (shownOrg) return [];
+    shownOrg = true;
+    return [
+      {
+        name: "组织优化每日流程",
+        where: [...new Set(orgSteps.map((step: any) => step.worker))].join("、"),
+        online: orgSteps.every((step: any) => step.online),
+        members: orgSteps,
+      },
+    ];
+  });
+  const presence = [...agents, ...state.channels.map((channel: any) => ({ ...channel, where: "通道" }))];
   if (presence.length) section(heading("在线"));
   const nameRoom = Math.max(0, ...presence.map((one) => width(one.name)));
   const whereRoom = Math.max(0, ...presence.map((one) => width(one.where)));
   for (const one of presence) {
     const head = `  ${one.online ? green("●") : red("○")} ${pad(one.name, nameRoom)}  `;
-    if (one.online) say(head + dim(one.where));
+    if (one.members) {
+      const online = one.members.filter((member: any) => member.online).length;
+      say(`${head}${dim(one.where)}  ${online}/${one.members.length} 个步骤在线`);
+      say(dim("    后台步骤已合并展示；完整详情：agent-autoloop status --json"));
+      for (const member of one.members.filter((member: any) => !member.online)) {
+        say(`    ${red(`${member.name}：离线`)}，最后在线 ${member.seenAt ? when(member.seenAt) : "没见过"}`);
+      }
+    } else if (one.online) say(head + dim(one.where));
     else
       say(
         `${head}${dim(pad(one.where, whereRoom))}  ${red(`离线，最后在线 ${one.seenAt ? when(one.seenAt) : "没见过"}`)}`,
@@ -247,6 +279,12 @@ export function render(state: any, { color, columns }: { color: boolean; columns
     if (retry && run.error) for (const line of wrap(run.error, room - 6, 2)) say(`      ${red(line)}`);
   }
 
+  if (nextChecks.size) section(heading("等待复查"));
+  for (const timer of [...nextChecks.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+    const subject = timer.lane ? ` · ${timer.lane}` : "";
+    say(`  ${timer.rule}${subject}  ${yellow(`下次复查 ${when(timer.at)}`)}`);
+  }
+
   const recentRuns = state.runs.filter(finished).slice(0, 8);
   if (recentRuns.length) section(heading("最近几轮"));
   for (const line of runRows(state, recentRuns, { color, columns })) say(line);
@@ -287,7 +325,7 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   const timed = [...state.lines.filter((line: any) => line.every), ...state.elsewhere];
   if (timed.length) section(heading("定时"));
   const ruleRoom = Math.max(0, ...timed.map((line: any) => width(line.name)));
-  const schedules = timed.map((line: any) => ({ ...line, nextText: when(line.next) }));
+  const schedules = timed.map((line: any) => ({ ...line, nextText: line.nextLabel ?? when(line.next) }));
   const nextRoom = Math.max(0, ...schedules.map((line: any) => width(line.nextText)));
   const available = room - ruleRoom - nextRoom - width("      下次 ");
   const everyRoom = Math.max(

@@ -26,6 +26,7 @@ import {
 } from "../host/service.ts";
 import { versionLine } from "../host/version.ts";
 import { clockFor, colorFor, render, replayCommand, skippedLine } from "./status.ts";
+import { localOrgScheduleDisplay } from "./org-schedule.ts";
 import { attemptsOf, newFailure, waitingRetry } from "./try.ts";
 
 const ROOT = path.join(import.meta.dirname, "..");
@@ -483,7 +484,12 @@ async function tryIt() {
 async function status(named: Flags) {
   const state = await ownerClient().state();
   if (named.json !== undefined) return console.log(JSON.stringify(state, null, 2));
-  console.log(render(state, { color: colorFor(process.stdout, process.env), columns: process.stdout.columns }));
+  console.log(
+    render(await localOrgScheduleDisplay(state), {
+      color: colorFor(process.stdout, process.env),
+      columns: process.stdout.columns,
+    }),
+  );
 }
 
 async function runs(args: string[]) {

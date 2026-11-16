@@ -1,3 +1,18 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 2f57f9e..778523e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -2,6 +2,10 @@
+ 
+ 先读 [docs/protocol.md](docs/protocol.md) 和 [架构图](docs/architecture.svg)：它们说明最终实现。
+ 
++## Fork 提交流程
++
++我们自己的改动直接提交并推送到 `is-test88/agent-autoloop` 的 `main`，不为这些改动创建独立分支或向上游开 PR。已关闭的上游 PR #295 保持关闭。
++
+ ## 原则
+ 
+ - **内核只收、只分、只派、只记。** `kernel/` 不主动连接任何东西，不知道任何产品的名字。`tests/purity.test.ts` 守着这几条，也守着 host、protocol、worker 不认识具体产品。新的产品、新的连接方式都是外面的插件。
 diff --git a/cli/explain.ts b/cli/explain.ts
 index cd78c3f..270b394 100644
 --- a/cli/explain.ts
@@ -30,7 +45,7 @@ index cd78c3f..270b394 100644
    const lines = [`事件：${source} ${parsed.type}${parsed.subject ? ` ${parsed.subject}` : ""}`];
    if (!rules.sources[source]) lines.push(`来源 ${source} 没有登记在 rules.json 的 sources 里`);
 diff --git a/cli/main.ts b/cli/main.ts
-index 8624663..8d7056e 100644
+index 15b14ce..f6bc724 100644
 --- a/cli/main.ts
 +++ b/cli/main.ts
 @@ -7,8 +7,9 @@ import path from "node:path";
@@ -66,7 +81,7 @@ index 8624663..8d7056e 100644
  }
  
  async function runs(args: string[]) {
-@@ -664,7 +671,9 @@ function checkRulesFile(file: string) {
+@@ -671,7 +678,9 @@ function checkRulesFile(file: string) {
    } catch (error) {
      throw new Error(`读不到 ${file}：${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
    }
@@ -252,7 +267,7 @@ index bf0cfb7..1961bbc 100644
  
    const unrouted = state.unrouted.slice(0, 5);
 diff --git a/docs/protocol.md b/docs/protocol.md
-index 008bbce..f654780 100644
+index 5ca4c25..600f18a 100644
 --- a/docs/protocol.md
 +++ b/docs/protocol.md
 @@ -102,6 +102,8 @@
@@ -456,6 +471,34 @@ index 44819d4..cde9e28 100644
 +  if (hours.length < 24) return `${calendar} ${ranges(hours)} 时，${withinHour}`;
 +  return calendar === "每天" ? withinHour : `${calendar}，${withinHour}`;
  }
+diff --git a/plugins/feishu/channel.ts b/plugins/feishu/channel.ts
+index cd12ae2..9870ce3 100644
+--- a/plugins/feishu/channel.ts
++++ b/plugins/feishu/channel.ts
+@@ -144,21 +144,8 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
+       if (!card) continue;
+       try {
+         const content = JSON.stringify(render(card));
+-        let ref = card.ref;
+-        if (ref) {
+-          try {
+-            await updateMessage(ref, content);
+-          } catch (error) {
+-            // The bot may not be the sender of the message it is told to change, and Feishu refuses that outright. An open
+-            // card stays as it is: the hub only counts answers on the message it first heard of, whose buttons still work.
+-            if (card.state === "open") throw error;
+-            // A settled one has no buttons: a second card is worse than one, a card frozen at the version before the answer
+-            // is worse than both. The key has the version so that a retry of this one makes no third.
+-            log(`card ${card.id}: couldn't update ${ref} (${error}); sending it again`);
+-            await sendMessage(`agent-autoloop-card-${card.id}-v${card.version}`, content);
+-          }
+-          // The key is the card alone, not its version: a report that got lost must not make a second message.
+-        } else ref = await sendMessage(`agent-autoloop-card-${card.id}`, content);
++        const ref = card.ref ?? (await sendMessage(`agent-autoloop-card-${card.id}`, content));
++        if (card.ref) await updateMessage(card.ref, content);
+         await hub.delivered(card.id, card.version, ref);
+       } catch (error) {
+         log(`card ${card.id} not sent: ${error}`);
 diff --git a/protocol/rules.ts b/protocol/rules.ts
 index 5189d00..0ded60b 100644
 --- a/protocol/rules.ts
@@ -482,10 +525,10 @@ index 5189d00..0ded60b 100644
    const limits = new Map<string, number | undefined>();
    for (const { group, parallel } of rules.rules) {
 diff --git a/skills/agent-autoloop/SKILL.md b/skills/agent-autoloop/SKILL.md
-index 1034505..3a50ef5 100644
+index 7d25104..4779ad2 100644
 --- a/skills/agent-autoloop/SKILL.md
 +++ b/skills/agent-autoloop/SKILL.md
-@@ -7,6 +7,14 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
+@@ -7,6 +7,18 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
  
  协议全文在 `docs/protocol.md`，这里是怎么做。程序在 `~/.agent-autoloop/app`，规则在 `~/.agent-autoloop/rules.json`，配置和密钥在 `~/.agent-autoloop/config.json`。
  
@@ -497,10 +540,14 @@ index 1034505..3a50ef5 100644
 +- `agent-autoloop update --check` 用于先确认新版本兼容本地补丁、规则和插件。只验证候选版，生产服务继续运行。
 +- `agent-autoloop update --drill` 用于验证升级全过程。用独立端口、数据库和服务实例分别演练正常切换、故障回滚，生产服务继续运行。
 +
++### Fork 提交流程
++
++我们自己的改动直接提交并推送到 `is-test88/agent-autoloop` 的 `main`，不为这些改动创建独立分支或向上游开 PR。已关闭的上游 PR #295 保持关闭。
++
  ## 看情况、回答
  
  `agent-autoloop status` 列出谁在线、等用户什么、在做什么、做过什么，还有按完成时间统计的今天和最近 7 天的轮数、Token 和费用（Token 含缓存，写出其中缓存占多少；同一轮重试的已报用量相加，没上报的轮数会写出来）。终端里它带颜色，接管道、被 Agent 调用或设了 `NO_COLOR` 时是纯文本。`agent-autoloop status --json` 输出 `/v1/state` 的原样结构，给脚本和看板用。`agent-autoloop answer <卡片> <序号>` 回答，`agent-autoloop resolve <卡片> <结果>` 结案，`agent-autoloop stop <第几轮>` 停掉一轮，等整个进程组退出才报告已停。
-@@ -19,6 +27,8 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
+@@ -19,6 +31,8 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
  
  改 `rules.json`，运行 `agent-autoloop check`。几秒内生效；写错了旧规则继续跑，并推一张卡片说错在哪。`agent-autoloop rules explain [文件]` 列出规则生效的样子和下次定时，`agent-autoloop emit <类型> --dry-run` 预演一条事件会派给谁，两个都只看本机文件（`rules explain` 不写文件时看 `rules.json`），不连接中台。尚未领取的任务在领活时一起更新 Agent、目录和权限；已领取任务的 Job 配置与接单程序保留到这次执行结束。
  
@@ -559,6 +606,133 @@ index 0000000..de7ffb0
 +  assert.equal(read("/explicit"), "/explicit");
 +  assert.throws(() => read(""), /cwd/);
 +});
+diff --git a/tests/channels.test.ts b/tests/channels.test.ts
+index d38ddd3..bc112aa 100644
+--- a/tests/channels.test.ts
++++ b/tests/channels.test.ts
+@@ -3,15 +3,15 @@
+ // isn't reported; a click that isn't a card's is taken; a card's options don't show while it's open or still show after;
+ // the listener dying isn't started again, or a listener that can't start takes the whole hub down. A GitHub webhook with
+ // a bad signature, or with none, is taken; what isn't an identifier reaches the subject; a ping makes an event;
+-// replacement tokens in card text rewrite a webhook template. A settled card Feishu won't let the bot change stays at the
+-// version before the answer; an open one is sent again with buttons that don't count.
++// replacement tokens in card text rewrite a webhook template. A failed Feishu patch is marked delivered by sending
++// a duplicate, leaving the original card open with stale buttons.
+ // A slow CLI call must not block the hub's HTTP loop while looking up a user, sending or updating a card.
+ // An ask card that only takes choices loses the account someone would type; words without a choice must still answer.
+ // A U+2028 or U+2029 in what someone typed, which JSON leaves as it is, cuts the click's line and loses the click.
+ // Older lark-cli releases reject `--content -`, so a first card must not depend on that stdin convention.
+ import assert from "node:assert/strict";
+ import { createHmac } from "node:crypto";
+-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { createServer } from "node:http";
+ import type { AddressInfo } from "node:net";
+ import { tmpdir } from "node:os";
+@@ -507,18 +507,26 @@ test("GitHub: signed or not taken, and what it says becomes a plain event", () =
+   );
+ });
+ 
+-/** A Feishu channel handed these cards, with a lark-cli that refuses every update: what it ran, and what it told the hub. */
+-async function refusedUpdates(given: Card[]) {
++async function updateAttempts(given: Card[], recover = false) {
+   const log = join(dir, "lark-patch.log");
+   const lark = join(dir, "lark-patch");
++  const body = join(dir, "lark-patch-body.json");
+   rmSync(log, { force: true });
++  rmSync(body, { force: true });
+   writeFileSync(
+     lark,
+     `#!/bin/sh
+ echo "$*" >> "${log}"
+ case "$*" in
+   *"event consume"*) exec sleep 30 ;;
+-  *"messages patch"*) cat > /dev/null; exit 1 ;;
++  *"messages patch"*)
++    if [ -f "${body}" ] && [ "${recover ? "yes" : "no"}" = "yes" ]; then
++      cat > "${body}"
++      echo '{"ok":true}'
++    else
++      cat > "${body}"
++      exit 1
++    fi ;;
+   *) cat > /dev/null; echo '{"ok":true,"data":{"message_id":"om_new"}}' ;;
+ esac
+ `,
+@@ -539,6 +547,7 @@ esac
+     },
+     async failed(id: number, version: number) {
+       calls.push(["failed", id, version]);
++      if (recover) cards.push(given[0]);
+       return {};
+     },
+     async answer(...args: unknown[]) {
+@@ -547,31 +556,35 @@ esac
+     },
+   };
+   await feishu({ hub: hub as any, options: { user: "ou_me", lark }, log: () => {}, signal: stop.signal });
+-  return { lines: readFileSync(log, "utf8").trim().split("\n"), calls };
++  return {
++    lines: readFileSync(log, "utf8").trim().split("\n"),
++    calls,
++    body: existsSync(body) ? JSON.parse(readFileSync(body, "utf8")) : null,
++  };
+ }
+ 
+-test("feishu: a settled card that can't be updated is sent again, once for each version", async () => {
+-  // Failure this guards: the bot didn't send the message being updated, so Feishu refuses and the update is dropped once the
+-  // tries run out. The reader is then stuck looking at the version before the answer.
+-  const { lines, calls } = await refusedUpdates([{ ...base, version: 2, ref: "om_old", state: "decided", choice: 1 }]);
+-  assert.ok(
+-    lines.some((l) => l.includes("messages patch --message-id om_old")),
+-    "the message that was sent is tried first",
+-  );
+-  const sends = lines.filter((l) => l.includes("+messages-send"));
+-  assert.equal(sends.length, 1, "a refused update falls back to a new message");
+-  assert.ok(sends[0].includes("--idempotency-key agent-autoloop-card-5-v2 "), "the second message is this version's");
+-  assert.deepEqual(calls, [["delivered", 5, 2, "om_old"]], "the hub goes on knowing the message it first heard of");
++test("feishu: a closed card retries the original message and removes the form", async () => {
++  const closed = { ...base, kind: "notice", version: 2, ref: "om_old", state: "closed", result: "连上了" } as Card;
++  const { lines, calls, body } = await updateAttempts([closed], true);
++  assert.equal(lines.filter((line) => line.includes("messages patch --message-id om_old")).length, 2);
++  assert.ok(!lines.some((line) => line.includes("+messages-send")));
++  assert.deepEqual(calls, [
++    ["failed", 5, 2],
++    ["delivered", 5, 2, "om_old"],
++  ]);
++  const content = JSON.parse(body.content);
++  assert.match(JSON.stringify(content.body), /连上了/);
++  assert.doesNotMatch(JSON.stringify(content.body), /"tag":"(?:form|button|interactive_container)"/);
+ });
+ 
+ test("feishu: an open card that can't be updated isn't sent again, and a first message is keyed by the card alone", async () => {
+   // Failure this guards: the hub only counts answers on the first message, so buttons on a second one would do nothing; a
+   // first message keyed by its version comes twice when a report is lost and the card has moved on.
+-  const open = await refusedUpdates([{ ...base, version: 2, ref: "om_old" }]);
++  const open = await updateAttempts([{ ...base, version: 2, ref: "om_old" }]);
+   assert.equal(open.lines.filter((l) => l.includes("+messages-send")).length, 0);
+   assert.deepEqual(open.calls, [["failed", 5, 2]], "it's tried again later");
+ 
+-  const first = await refusedUpdates([{ ...base, version: 3, ref: null }]);
++  const first = await updateAttempts([{ ...base, version: 3, ref: null }]);
+   const [send] = first.lines.filter((l) => l.includes("+messages-send"));
+   assert.ok(send.includes("--idempotency-key agent-autoloop-card-5 "), send);
+   assert.deepEqual(first.calls, [["delivered", 5, 3, "om_new"]]);
+diff --git a/tests/cli-runs.test.ts b/tests/cli-runs.test.ts
+index 3ef9644..55c43a8 100644
+--- a/tests/cli-runs.test.ts
++++ b/tests/cli-runs.test.ts
+@@ -95,8 +95,8 @@ test("runs still going are left to status, and an old unsettled one the first pa
+ test("each run is one entry with its number, how it ended and its rule; more says how to go on", async () => {
+   const { page } = hub(30);
+   const text = runsText(await findRuns(page, { rule: "A", want: 2 }), { rule: "A", color: false, columns: 100 });
+-  assert.match(text, /#30 +做完了 +A\n +第 30 轮的结果/);
+-  assert.match(text, /#29 +做完了 +A/);
++  assert.match(text, /#30 +本轮已结束 +A\n +第 30 轮的结果/);
++  assert.match(text, /#29 +本轮已结束 +A/);
+   assert.match(text, /agent-autoloop runs A --before 29/);
+   const none = runsText(await findRuns(page, { rule: "C" }), { rule: "C", color: false, columns: 100 });
+   assert.match(none, /「C」没有做完的轮次/);
 diff --git a/tests/cron.test.ts b/tests/cron.test.ts
 index d75f39d..55a534e 100644
 --- a/tests/cron.test.ts
@@ -580,6 +754,19 @@ index d75f39d..55a534e 100644
 +    "每月 1、3、5、7、9、11、13、15、17、19、21、23、25、27、29、31 日且为周一 09:00",
 +  );
  });
+diff --git a/tests/loop.test.ts b/tests/loop.test.ts
+index 54aa95c..afd401a 100644
+--- a/tests/loop.test.ts
++++ b/tests/loop.test.ts
+@@ -180,7 +180,7 @@ test("one machine, one command: an event, a question, an answer, the work done",
+   assert.match(cli("answer", String(card.id), "1").stdout, /已经/);
+ 
+   const status = cli("status");
+-  assert.match(status.stdout, /等你 0 · 在跑 0 · 排队 0 · 今天做完 2/);
++  assert.match(status.stdout, /等你 0 · 在跑 0 · 排队 0 · 今天成功结束 2 轮/);
+   assert.match(status.stdout, /你选了绿色，做完了/);
+   const told = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", bin, "tell", "note-1"], {
+     env,
 diff --git a/tests/rules.test.ts b/tests/rules.test.ts
 index 27ffb6e..9cc1ef4 100644
 --- a/tests/rules.test.ts

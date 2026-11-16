@@ -11,7 +11,7 @@ from verify import install_upgrade_skill
 HERE = Path(__file__).resolve().parent
 FILES = ('agent-autoloop', 'drill.py', 'help-text.sh', 'plugins-check.mjs',
          'receipt-check.py', 'skill-upgrade.md', 'upgrade.py', 'verify.py', 'README.md')
-BASE = 'v1.8.4'
+BASE = 'v1.9.0'
 PATCH = HERE / f'{BASE}-local.patch'
 
 

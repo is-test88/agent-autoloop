@@ -95,8 +95,8 @@ test("runs still going are left to status, and an old unsettled one the first pa
 test("each run is one entry with its number, how it ended and its rule; more says how to go on", async () => {
   const { page } = hub(30);
   const text = runsText(await findRuns(page, { rule: "A", want: 2 }), { rule: "A", color: false, columns: 100 });
-  assert.match(text, /#30 +做完了 +A\n +第 30 轮的结果/);
-  assert.match(text, /#29 +做完了 +A/);
+  assert.match(text, /#30 +本轮已结束 +A\n +第 30 轮的结果/);
+  assert.match(text, /#29 +本轮已结束 +A/);
   assert.match(text, /agent-autoloop runs A --before 29/);
   const none = runsText(await findRuns(page, { rule: "C" }), { rule: "C", color: false, columns: 100 });
   assert.match(none, /「C」没有做完的轮次/);

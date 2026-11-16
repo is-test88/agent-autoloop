@@ -7,7 +7,15 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
 
 协议全文在 `docs/protocol.md`，这里是怎么做。程序在 `~/.agent-autoloop/app`，规则在 `~/.agent-autoloop/rules.json`，配置和密钥在 `~/.agent-autoloop/config.json`。
 
-## Fork 提交流程
+## 本机升级
+
+在这台 Mac 上，从 PATH 运行以下命令。升级入口独立于 app 安装目录，换版时会把本节写入候选版 Skill 并验证帮助输出。
+
+- `agent-autoloop update` 用于正式升级。先移植本地补丁并验证，通过后才切换服务。切换失败会自动回滚。
+- `agent-autoloop update --check` 用于先确认新版本兼容本地补丁、规则和插件。只验证候选版，生产服务继续运行。
+- `agent-autoloop update --drill` 用于验证升级全过程。用独立端口、数据库和服务实例分别演练正常切换、故障回滚，生产服务继续运行。
+
+### Fork 提交流程
 
 我们自己的改动直接提交并推送到 `is-test88/agent-autoloop` 的 `main`，不为这些改动创建独立分支或向上游开 PR。已关闭的上游 PR #295 保持关闭。
 
@@ -138,7 +146,7 @@ Claude 主任务要委托 Codex 操作网页时，从 `examples/recipes/browser-
 
 多个项目共用规则时，在接单命令后加 `--review-policy owner/config:ops/review-policy.json`。插件从这个仓库的 main 读取文件。`reviewers` 按名字给出模型（字符串简写）或 `{ "model": "…", "effort": "xhigh" }`，`default` 是默认审查器名称列表，`agents` 给每种开发 Agent 写列表，空列表免审，同名写两次独立审查两次。`trusted_submitters` 列出可以登记来源的 GitHub 数字账号。深审路径和显式只审查都可覆盖免审。已有分支规则指定审查状态时，用 `--review-status` 传它的名字。
 
-`AGENTS.md` 要有 `## 审查要点`。`review.command` 可用命令数组替换审查程序：提示词从标准输入读，`{input}` 替换成文字差异文件，标准输出必须是 `{"findings":[{"title":"文件:行号和问题","text":"触发条件和后果"}]}`；没问题交空列表。默认 Codex 忽略用户配置、禁用记忆，只读单独的审查快照。`admin_merge` 默认为空；只有 main 明确列出的 PR 作者才能使用管理员合并。没有线上服务的项目可以省略 `health`，回执会明确写只完成合并。
+`AGENTS.md` 要有 `## 审查要点`。`review.command` 可用命令数组替换审查程序：提示词从标准输入读，`{input}` 替换成文字差异文件，标准输出必须是 `{"findings":[{"title":"文件:行号和问题","text":"触发条件和后果"}]}`；没问题交空列表。每个审查器最多跑 30 分钟。默认 Codex 忽略用户配置、禁用记忆，只读单独的审查快照。`admin_merge` 默认为空；只有 main 明确列出的 PR 作者才能使用管理员合并。没有线上服务的项目可以省略 `health`，回执会明确写只完成合并。
 
 要按写代码的 Agent 定审查，在 `review` 里加 `agents` 和 `trusted`：
 

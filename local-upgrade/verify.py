@@ -49,6 +49,11 @@ def verify_candidate(app, home, here, node, cli, run):
     rules = json.loads((home / 'rules.json').read_text())
     config = json.loads((home / 'config.json').read_text())
 
+    collector = rules['agents']['meishi-collector']['command']
+    if len(collector) != 2 or Path(collector[1]) != home / 'meishi-review/collect.mjs':
+        raise RuntimeError('美事监听没有使用本地 collect.mjs')
+    run(*collector, '--check-bridge', env=env)
+
     for section, files in CHECKS.items():
         print(f'验证 {section}', flush=True)
         root = app / 'tests' if section.startswith('中文') else home
