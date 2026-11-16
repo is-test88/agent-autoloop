@@ -1,8 +1,16 @@
 diff --git a/cli/main.ts b/cli/main.ts
-index 8624663..a672902 100644
+index 8624663..efcd1d8 100644
 --- a/cli/main.ts
 +++ b/cli/main.ts
-@@ -25,6 +25,7 @@ import {
+@@ -7,6 +7,7 @@ import path from "node:path";
+ import { createInterface } from "node:readline/promises";
+ import { hubClient } from "../protocol/client.ts";
+ import { parseRules } from "../protocol/rules.ts";
++import { checkBackgroundLaunch } from "../host/background-launch.ts";
+ import { CONFIG_FILE, readConfig, writeConfig, type Config } from "../host/config.ts";
+ import { HOME, RULES_FILE } from "../host/home.ts";
+ import { findOnPath, psQuote } from "../host/command.ts";
+@@ -25,6 +26,7 @@ import {
  } from "../host/service.ts";
  import { versionLine } from "../host/version.ts";
  import { clockFor, colorFor, render, replayCommand, skippedLine } from "./status.ts";
@@ -10,7 +18,7 @@ index 8624663..a672902 100644
  import { attemptsOf, newFailure, waitingRetry } from "./try.ts";
  
  const ROOT = path.join(import.meta.dirname, "..");
-@@ -482,7 +483,12 @@ async function tryIt() {
+@@ -482,7 +484,12 @@ async function tryIt() {
  async function status(named: Flags) {
    const state = await ownerClient().state();
    if (named.json !== undefined) return console.log(JSON.stringify(state, null, 2));
@@ -24,6 +32,15 @@ index 8624663..a672902 100644
  }
  
  async function runs(args: string[]) {
+@@ -664,7 +671,7 @@ function checkRulesFile(file: string) {
+   } catch (error) {
+     throw new Error(`读不到 ${file}：${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
+   }
+-  return parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
++  return checkBackgroundLaunch(parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone));
+ }
+ 
+ function check(args: string[]) {
 diff --git a/cli/org-schedule.ts b/cli/org-schedule.ts
 new file mode 100644
 index 0000000..d8fc090
@@ -198,6 +215,86 @@ index bf0cfb7..1961bbc 100644
    }
  
    const unrouted = state.unrouted.slice(0, 5);
+diff --git a/host/background-launch.ts b/host/background-launch.ts
+new file mode 100644
+index 0000000..efd7f38
+--- /dev/null
++++ b/host/background-launch.ts
+@@ -0,0 +1,53 @@
++import { realpathSync } from "node:fs";
++import { homedir } from "node:os";
++import { dirname, join, resolve, sep } from "node:path";
++import type { Rules } from "../kernel/rules.ts";
++import { RulesError } from "../protocol/rules.ts";
++
++type LaunchRules = {
++  rules: Array<{ name: string; to: string; cwd?: string }>;
++  elsewhere: Array<{ name: string; to: string; cwd?: string }>;
++  agents: Record<string, { program?: string; command?: string[] }>;
++};
++
++function physical(path: string): string {
++  try {
++    return realpathSync(path);
++  } catch {
++    const parent = dirname(path);
++    return parent === path ? path : join(physical(parent), path.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
++  }
++}
++
++const script = /\.(?:[cm]?[jt]sx?|py|sh|zsh|bash|fish|rb|pl|ps1)$/i;
++
++export function validateBackgroundLaunch(rules: LaunchRules, home: string) {
++  const folders = ["Documents", "Desktop", "Downloads"].flatMap((folder) => {
++    const path = resolve(home, folder);
++    return [path, physical(path)];
++  });
++  const absolute = (value: string, cwd: string) =>
++    value.startsWith("~/") ? resolve(home, value.slice(2)) : resolve(cwd, value);
++  const issues: string[] = [];
++  for (const entry of [...rules.rules, ...rules.elsewhere]) {
++    if (!entry.cwd) continue;
++    const cwd = absolute(entry.cwd, home);
++    const agent = rules.agents[entry.to];
++    const [executable, ...args] = agent.command ?? [];
++    const paths = [entry.cwd, agent.program, executable, ...args.filter((value) => script.test(value))];
++    for (const [index, value] of paths.entries()) {
++      if (!value || !value.includes("/") || value.includes("{")) continue;
++      const path = absolute(value, index === 0 ? home : cwd);
++      const candidates = [path, physical(path)];
++      if (folders.some((folder) => candidates.some((item) => item === folder || item.startsWith(folder + sep)))) {
++        issues.push(`「${entry.name}」的后台启动路径 ${value} 位于 macOS 受保护目录，请使用后台运行目录`);
++      }
++    }
++  }
++  if (issues.length) throw new RulesError(issues);
++}
++
++export function checkBackgroundLaunch(rules: Rules) {
++  if (process.platform === "darwin") validateBackgroundLaunch(rules, homedir());
++  return rules;
++}
+diff --git a/host/runtime.ts b/host/runtime.ts
+index 3079092..641aedb 100644
+--- a/host/runtime.ts
++++ b/host/runtime.ts
+@@ -14,6 +14,7 @@ import { initialize, rows, statement, type Fact, type Row, type Table } from "..
+ import * as query from "../kernel/query.ts";
+ import { commitLatest, openView } from "../kernel/store.ts";
+ import { parseRules as checkRules, RulesError } from "../protocol/rules.ts";
++import { checkBackgroundLaunch } from "./background-launch.ts";
+ 
+ privateDirectory(HOME);
+ const masterKeyFile = join(HOME, "master.key");
+@@ -94,7 +95,7 @@ export function execute(type: string, args: any[], now = Date.now()) {
+ }
+ 
+ export const parseRules = (json: string, now = Date.now()) =>
+-  checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone);
++  checkBackgroundLaunch(checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone));
+ export let rules = query.configuration(current);
+ 
+ export function reloadRules(file = RULES_FILE): { problem?: string } {
 diff --git a/kernel/cron.ts b/kernel/cron.ts
 index 44819d4..cde9e28 100644
 --- a/kernel/cron.ts
@@ -296,6 +393,42 @@ index 1034505..3df9c7a 100644
  ## 看情况、回答
  
  `agent-autoloop status` 列出谁在线、等用户什么、在做什么、做过什么，还有按完成时间统计的今天和最近 7 天的轮数、Token 和费用（Token 含缓存，写出其中缓存占多少；同一轮重试的已报用量相加，没上报的轮数会写出来）。终端里它带颜色，接管道、被 Agent 调用或设了 `NO_COLOR` 时是纯文本。`agent-autoloop status --json` 输出 `/v1/state` 的原样结构，给脚本和看板用。`agent-autoloop answer <卡片> <序号>` 回答，`agent-autoloop resolve <卡片> <结果>` 结案，`agent-autoloop stop <第几轮>` 停掉一轮，等整个进程组退出才报告已停。
+diff --git a/tests/background-launch.test.ts b/tests/background-launch.test.ts
+new file mode 100644
+index 0000000..17f5cc3
+--- /dev/null
++++ b/tests/background-launch.test.ts
+@@ -0,0 +1,30 @@
++// A new or edited rule must not make a macOS background worker start in a protected location.
++import assert from "node:assert/strict";
++import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { test } from "node:test";
++import { validateBackgroundLaunch } from "../host/background-launch.ts";
++
++test("generic startup validation covers new rules, aliases, and script arguments", () => {
++  const home = mkdtempSync(join(tmpdir(), "startup-test-"));
++  try {
++    mkdirSync(join(home, "Documents"));
++    symlinkSync(join(home, "Documents"), join(home, "alias"));
++    const rules = {
++      rules: [{ name: "a new task", to: "worker", cwd: "~/.agent-autoloop/jobs" }],
++      agents: { worker: { command: ["node", "--no-warnings", "~/.agent-autoloop/run.mjs"] } },
++      elsewhere: [],
++    };
++    assert.doesNotThrow(() => validateBackgroundLaunch(rules, home));
++    rules.rules[0].cwd = "~/alias/project";
++    assert.throws(() => validateBackgroundLaunch(rules, home), /a new task.*alias/);
++    rules.rules[0].cwd = "~/.agent-autoloop/jobs";
++    rules.agents.worker.command[2] = "~/Documents/run.mjs";
++    assert.throws(() => validateBackgroundLaunch(rules, home), /a new task.*run.mjs/);
++    rules.agents.worker.command = ["cat", "~/Documents/business-data.json"];
++    assert.doesNotThrow(() => validateBackgroundLaunch(rules, home));
++  } finally {
++    rmSync(home, { recursive: true, force: true });
++  }
++});
 diff --git a/tests/cron.test.ts b/tests/cron.test.ts
 index d75f39d..55a534e 100644
 --- a/tests/cron.test.ts

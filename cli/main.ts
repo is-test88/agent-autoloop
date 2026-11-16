@@ -7,6 +7,7 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { hubClient } from "../protocol/client.ts";
 import { parseRules } from "../protocol/rules.ts";
+import { checkBackgroundLaunch } from "../host/background-launch.ts";
 import { CONFIG_FILE, readConfig, writeConfig, type Config } from "../host/config.ts";
 import { HOME, RULES_FILE } from "../host/home.ts";
 import { findOnPath, psQuote } from "../host/command.ts";
@@ -671,7 +672,7 @@ function checkRulesFile(file: string) {
   } catch (error) {
     throw new Error(`读不到 ${file}：${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
   }
-  return parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
+  return checkBackgroundLaunch(parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone));
 }
 
 function check(args: string[]) {

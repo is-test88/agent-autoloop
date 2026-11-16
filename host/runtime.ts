@@ -14,6 +14,7 @@ import { initialize, rows, statement, type Fact, type Row, type Table } from "..
 import * as query from "../kernel/query.ts";
 import { commitLatest, openView } from "../kernel/store.ts";
 import { parseRules as checkRules, RulesError } from "../protocol/rules.ts";
+import { checkBackgroundLaunch } from "./background-launch.ts";
 
 privateDirectory(HOME);
 const masterKeyFile = join(HOME, "master.key");
@@ -94,7 +95,7 @@ export function execute(type: string, args: any[], now = Date.now()) {
 }
 
 export const parseRules = (json: string, now = Date.now()) =>
-  checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  checkBackgroundLaunch(checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone));
 export let rules = query.configuration(current);
 
 export function reloadRules(file = RULES_FILE): { problem?: string } {
