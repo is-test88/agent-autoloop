@@ -144,21 +144,8 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
       if (!card) continue;
       try {
         const content = JSON.stringify(render(card));
-        let ref = card.ref;
-        if (ref) {
-          try {
-            await updateMessage(ref, content);
-          } catch (error) {
-            // The bot may not be the sender of the message it is told to change, and Feishu refuses that outright. An open
-            // card stays as it is: the hub only counts answers on the message it first heard of, whose buttons still work.
-            if (card.state === "open") throw error;
-            // A settled one has no buttons: a second card is worse than one, a card frozen at the version before the answer
-            // is worse than both. The key has the version so that a retry of this one makes no third.
-            log(`card ${card.id}: couldn't update ${ref} (${error}); sending it again`);
-            await sendMessage(`agent-autoloop-card-${card.id}-v${card.version}`, content);
-          }
-          // The key is the card alone, not its version: a report that got lost must not make a second message.
-        } else ref = await sendMessage(`agent-autoloop-card-${card.id}`, content);
+        const ref = card.ref ?? (await sendMessage(`agent-autoloop-card-${card.id}`, content));
+        if (card.ref) await updateMessage(card.ref, content);
         await hub.delivered(card.id, card.version, ref);
       } catch (error) {
         log(`card ${card.id} not sent: ${error}`);

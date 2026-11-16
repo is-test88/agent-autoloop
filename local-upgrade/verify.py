@@ -67,7 +67,7 @@ def verify_candidate(app, home, here, node, cli, run):
     # The local override has its own card layout, so select the interaction tests it shares.
     temporary_test.write_text(source.replace(old, '"../../plugins/feishu/channel.ts"'))
     try:
-        run(node, '--test', '--test-name-pattern=handling note|text form', temporary_test, env=env)
+        run(node, '--test', '--test-name-pattern=handling note|text form|closed card retries', temporary_test, env=env)
     finally:
         temporary_test.unlink()
 
