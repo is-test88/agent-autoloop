@@ -32,3 +32,5 @@ agent-autoloop --help
 本仓库只存程序、补丁和说明。另从可信备份恢复 `config.json`、`rules.json`、所需密钥及状态，以及 `plugins/`、`jobs/`、`gitea-review/`、`delivery-shared-source/`、`meishi-review/`、`org-optimization/` 和 `ssc-weekly/`。检查规则和任务脚本中的绝对路径与新机一致，恢复飞书、HR CLI 邮箱和 Codex 所需的授权及依赖。需要历史状态时，使用原机的 `agent-autoloop backup` 与新机的 `agent-autoloop restore`，保护好离线备份。进行实际切换前运行 `agent-autoloop update --check`。服务接通后可运行 `agent-autoloop update --drill` 演练。
 
 如果这台 Mac 启用 Gitea 自定义交付，在恢复本机 Gitea 目录和 Skill 后运行 `python3 -B local-upgrade/gitea-review/install.py`。适配器直接加载安装版的交付审查模块，审查历史留在本机。安装时保留前一版入口，并保留相同命令、模型与深度已完成的审查记录。
+
+飞书升级预检使用假 CLI 验证原卡更新、确认浮层和重复回调，同时用隔离中台核对重复确认只入队一次。不会连接飞书。重新配置飞书时，按[快速更新构建说明](../plugins/feishu/fast-cli.md)生成可选二进制并在本机设置路径。

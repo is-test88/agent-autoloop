@@ -38,6 +38,7 @@ def restore(home, bin_dir):
     local.mkdir(mode=0o700)
     for filename in FILES:
         shutil.copy2(HERE / filename, local / filename)
+    shutil.copy2(HERE.parent / 'tests/feishu-fast.test.ts', local / 'feishu-fast.test.ts')
     (local / 'agent-autoloop').chmod(0o700)
     install_upgrade_skill(app, local)
     bin_dir.mkdir(parents=True, exist_ok=True)

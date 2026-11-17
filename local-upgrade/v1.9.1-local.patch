@@ -1,3 +1,13 @@
+diff --git a/.gitattributes b/.gitattributes
+index 4b887bf..aed25de 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,2 +1,5 @@
+ * text=auto eol=lf
+ *.cmd text eol=crlf
++
++# Unified diffs retain their context indentation.
++plugins/feishu/fast-cli.patch -whitespace
 diff --git a/AGENTS.md b/AGENTS.md
 index 2f57f9e..778523e 100644
 --- a/AGENTS.md
@@ -935,10 +945,75 @@ index 8913f79..d6020ce 100644
    return parseReview(command ? text : readFileSync(output, "utf8"));
  }
 diff --git a/plugins/feishu/channel.ts b/plugins/feishu/channel.ts
-index cd12ae2..9870ce3 100644
+index cd12ae2..8a6e16b 100644
 --- a/plugins/feishu/channel.ts
 +++ b/plugins/feishu/channel.ts
-@@ -144,21 +144,8 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
+@@ -4,6 +4,7 @@
+ //   "channels": { "feishu": { "key": "…", "user": "ou_xxx" } } in config.json
+ //   "channels": { "feishu": { "name": "飞书", "answerers": ["ou_xxx"] } } in rules.json: who may answer.
+ import { execFile, spawn } from "node:child_process";
++import { createInterface } from "node:readline";
+ import type { Card, ChannelContext } from "../../host/channels.ts";
+ import { eachLine } from "../../host/lines.ts";
+ import { commandLine } from "../../host/command.ts";
+@@ -20,7 +21,7 @@ function safeJson(text: unknown): any {
+ 
+ function outcomeOf(card: Card) {
+   const chosen = card.choice === null ? card.answer : card.options[card.choice];
+-  if (card.state === "decided") return `你选了「${chosen}」，已记录，等待处理。`;
++  if (card.state === "decided") return `已收到确认：${chosen}。等待执行。`;
+   if (card.state === "done") return `你选了「${chosen}」。${card.result ? `已执行：${card.result}` : "已执行。"}`;
+   if (card.state === "closed" && card.kind === "ask") return `不用决定了：${card.result ?? ""}`;
+   return card.state === "closed" && card.result ? card.result : null;
+@@ -121,8 +122,45 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
+   const owner = (options.user as string | undefined) ?? (await lark(["auth", "status"], "")).identities?.user?.openId;
+   if (!owner) throw new Error("飞书通道要在 config.json 写 user，或者先 lark-cli auth login");
+ 
+-  const updateMessage = (ref: string, content: string) =>
+-    lark(["im", "messages", "patch", "--message-id", ref, "--as", "bot", "--data", "-"], JSON.stringify({ content }));
++  const fastCli = typeof options.fastCli === "string" ? options.fastCli : null;
++  function startPatches(cli: string) {
++    const child = spawn(...commandLine([cli, "autoloop-card-patches"]), {
++      stdio: ["pipe", "pipe", "ignore"],
++      signal,
++    });
++    child.on("error", () => {});
++    child.stdin.on("error", () => {});
++    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
++    const replies = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
++    return { child, closed, replies };
++  }
++  let patches = fastCli ? startPatches(fastCli) : null;
++
++  async function updateMessage(ref: string, content: string) {
++    if (fastCli && !signal.aborted) {
++      const current = (patches ??= startPatches(fastCli));
++      try {
++        await new Promise<void>((resolve, reject) => {
++          current.child.stdin.write(JSON.stringify({ ref, content }) + "\n", (error) =>
++            error ? reject(error) : resolve(),
++          );
++        });
++        const reply = await current.replies.next();
++        if (!reply.done && JSON.parse(reply.value).ok === true) return;
++        throw new Error("patch not confirmed");
++      } catch {
++        current.child.kill();
++        await current.closed;
++        patches = null;
++        if (signal.aborted) throw signal.reason;
++        log("飞书快速更新失败，用原方式重试这张卡片");
++      }
++    }
++    await lark(
++      ["im", "messages", "patch", "--message-id", ref, "--as", "bot", "--data", "-"],
++      JSON.stringify({ content }),
++    );
++  }
+ 
+   /** Sends the card's words as a new message, or hands back the one an earlier try with this key already made. */
+   async function sendMessage(key: string, content: string) {
+@@ -144,21 +182,8 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
        if (!card) continue;
        try {
          const content = JSON.stringify(render(card));
@@ -962,6 +1037,401 @@ index cd12ae2..9870ce3 100644
          await hub.delivered(card.id, card.version, ref);
        } catch (error) {
          log(`card ${card.id} not sent: ${error}`);
+@@ -168,8 +193,7 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
+   }
+ 
+   /** Only the owner's click on the card that was sent counts; the hub checks both. */
+-  async function clicked(line: string) {
+-    const event = JSON.parse(line);
++  async function clicked(event: Record<string, any>) {
+     const form = safeJson(event.form_value);
+     const value = safeJson(event.action_value);
+     // A form's submit button can't carry a value, so its name holds the card's number.
+@@ -182,7 +206,7 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
+         : words
+           ? Number(words[1])
+           : null;
+-    if (!Number.isInteger(cardId)) return;
++    if (!Number.isInteger(cardId)) return "ignored" as const;
+     const note = typeof form?.note === "string" ? form.note : undefined;
+     const given: { choice?: number; by?: string; ref?: string; text?: string } = {
+       by: event.operator_id,
+@@ -190,34 +214,58 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
+     };
+     if (words) {
+       // An ask card's text form answers with the words alone; an empty one is no answer at all.
+-      if (!note || !note.trim()) return;
++      if (!note || !note.trim()) return "ignored" as const;
+       given.text = note;
+     } else {
+       // A notice's only option is that it's been handled, so submitting its form picks it.
+       const choice = Number.isInteger(value?.choice) ? value.choice : form ? 0 : null;
+-      if (choice === null) return;
++      if (choice === null) return "ignored" as const;
+       given.choice = choice;
+       if (note !== undefined) given.text = note;
+     }
+     const answer = await hub.answer(cardId, given);
+     const how = words ? "text submitted" : form ? "note submitted" : "answered";
+     log(`card ${cardId}: ${how} by ${event.operator_id}, ${answer.changed ? "counted" : "already settled"}`);
++    return answer.changed ? "accepted" : "duplicate";
+   }
+ 
+   async function listen() {
++    let listener = fastCli;
+     while (!signal.aborted) {
+       // stdin stays open: lark-cli ends an unbounded consume when its stdin closes.
+-      const consume = spawn(...commandLine([program, "event", "consume", "card.action.trigger", "--as", "bot"]), {
++      const toast = listener !== null && options.callbackToast === true;
++      const args = toast ? ["autoloop-card-callbacks"] : ["event", "consume", "card.action.trigger", "--as", "bot"];
++      const consume = spawn(...commandLine([listener ?? program, ...args]), {
+         stdio: ["pipe", "pipe", "pipe"],
++        ...(listener &&
++          !toast && {
++            env: { ...process.env, AUTOLOOP_FEISHU_SKIP_CARD_LOOKUP: "1" },
++          }),
+       });
+       // Unheard, this would end the whole hub. A process that never started still closes, which starts it again below.
+       consume.on("error", (error) => log(`the click listener couldn't run: ${error}`));
+       const stop = () => consume.kill();
+       signal.addEventListener("abort", stop);
++      consume.stdin.on("error", () => {});
+       eachLine(consume.stderr, log);
+-      eachLine(consume.stdout, (line) => void clicked(line).catch((error) => log(`click not handled: ${error}`)));
++      eachLine(consume.stdout, (line) => {
++        void (async () => {
++          const event = JSON.parse(line);
++          const outcome = await clicked(event).catch((error) => {
++            log(`click not handled: ${error}`);
++            return "failed";
++          });
++          if (toast && Number.isSafeInteger(event.receipt) && !consume.stdin.destroyed) {
++            consume.stdin.write(JSON.stringify({ receipt: event.receipt, outcome }) + "\n");
++          }
++        })().catch((error) => log(`click not handled: ${error}`));
++      });
+       await new Promise((resolve) => consume.on("close", resolve));
+       signal.removeEventListener("abort", stop);
++      if (listener && !signal.aborted) {
++        listener = null;
++        continue;
++      }
+       if (!signal.aborted) {
+         log("the click listener stopped; starting it again in 10 seconds");
+         await new Promise((resolve) => setTimeout(resolve, 10_000));
+diff --git a/plugins/feishu/fast-cli.md b/plugins/feishu/fast-cli.md
+new file mode 100644
+index 0000000..a76f0e4
+--- /dev/null
++++ b/plugins/feishu/fast-cli.md
+@@ -0,0 +1,19 @@
++# 飞书卡片快速更新
++
++默认通过 `lark-cli` 收发卡片。飞书通道可选配 `fastCli`，值是用本目录 `fast-cli.patch` 构建的可执行文件绝对路径。它沿用本机 `lark-cli` 的账户和凭据存取方式。它跳过回调里多余的卡片正文读取，原卡更新通过常驻客户端复用机器人令牌和连接。快速更新失败时，通道仍用普通 `lark-cli` 重试原卡。
++
++构建需要 Go。下面的命令在临时目录构建，不覆盖系统安装的 `lark-cli`。
++
++```sh
++patch_file=/absolute/path/to/agent-autoloop/plugins/feishu/fast-cli.patch
++build_dir=$(mktemp -d)
++git clone --depth 1 --branch v1.0.99 https://github.com/larksuite/cli.git "$build_dir/cli"
++git -C "$build_dir/cli" apply "$patch_file"
++(cd "$build_dir/cli" && go build -ldflags '-X github.com/larksuite/cli/internal/build.Version=1.0.99' -o "$build_dir/lark-cli-fast" .)
++```
++
++将二进制放在本机的稳定路径，配置 `channels.feishu.fastCli` 后重启服务。
++
++同时设置 `channels.feishu.callbackToast: true` 启用回调浮层。它使用同一个飞书应用的长连接，在中台记下确认后直接返回「已收到确认」。重复提交返回卡片已经处理，任务完成仍更新原卡。切换时先停旧监听及该应用的 CLI 事件总线，再启动新监听。新监听启动失败会回到 CLI 的普通回调。去掉 `callbackToast` 并重启可恢复上一种监听，保留快速更新。
++
++验证时用只做模拟工作的测试卡，分别记录桌面端和手机端从点击到浮层可见的时间，再核对原卡最终结果与重复点击对应的执行轮次。
+diff --git a/plugins/feishu/fast-cli.patch b/plugins/feishu/fast-cli.patch
+new file mode 100644
+index 0000000..c592253
+--- /dev/null
++++ b/plugins/feishu/fast-cli.patch
+@@ -0,0 +1,282 @@
++diff --git a/cmd/autoloop_callbacks.go b/cmd/autoloop_callbacks.go
++new file mode 100644
++index 0000000..cbf1873
++--- /dev/null
+++++ b/cmd/autoloop_callbacks.go
++@@ -0,0 +1,177 @@
+++// SPDX-License-Identifier: MIT
+++package cmd
+++
+++import (
+++	"bufio"
+++	"context"
+++	"encoding/json"
+++	"errors"
+++	"fmt"
+++	"io"
+++	"strings"
+++	"sync"
+++	"time"
+++
+++	"github.com/larksuite/cli/internal/cmdutil"
+++	"github.com/larksuite/cli/internal/core"
+++	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
+++	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+++	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+++	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+++	"github.com/spf13/cobra"
+++)
+++
+++type callbackReply struct {
+++	Receipt uint64 `json:"receipt"`
+++	Outcome string `json:"outcome"`
+++}
+++
+++type callbackBridge struct {
+++	mu      sync.Mutex
+++	next    uint64
+++	pending map[uint64]chan string
+++	out     *json.Encoder
+++	log     io.Writer
+++}
+++
+++func (b *callbackBridge) replies(in io.Reader) {
+++	scan := bufio.NewScanner(in)
+++	for scan.Scan() {
+++		var reply callbackReply
+++		if json.Unmarshal(scan.Bytes(), &reply) != nil {
+++			continue
+++		}
+++		b.mu.Lock()
+++		if ch := b.pending[reply.Receipt]; ch != nil {
+++			delete(b.pending, reply.Receipt)
+++			ch <- reply.Outcome
+++		}
+++		b.mu.Unlock()
+++	}
+++}
+++
+++func callbackValues(values map[string]interface{}) string {
+++	if len(values) == 0 {
+++		return ""
+++	}
+++	encoded, _ := json.Marshal(values)
+++	return string(encoded)
+++}
+++
+++func (b *callbackBridge) onCard(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+++	start := time.Now()
+++	action := event.Event
+++	if action == nil || action.Operator == nil || action.Context == nil || action.Action == nil {
+++		return &callback.CardActionTriggerResponse{}, nil
+++	}
+++	wait := make(chan string, 1)
+++	b.mu.Lock()
+++	b.next++
+++	id := b.next
+++	b.pending[id] = wait
+++	err := b.out.Encode(map[string]interface{}{
+++		"receipt": id, "operator_id": action.Operator.OpenID,
+++		"message_id": action.Context.OpenMessageID, "action_name": action.Action.Name,
+++		"action_value": callbackValues(action.Action.Value), "form_value": callbackValues(action.Action.FormValue),
+++	})
+++	b.mu.Unlock()
+++	defer func() {
+++		b.mu.Lock()
+++		delete(b.pending, id)
+++		b.mu.Unlock()
+++	}()
+++
+++	outcome := "failed"
+++	if err == nil {
+++		ctx, cancel := context.WithDeadline(ctx, start.Add(1800*time.Millisecond))
+++		defer cancel()
+++		select {
+++		case outcome = <-wait:
+++		case <-ctx.Done():
+++		}
+++	}
+++
+++	var response callback.CardActionTriggerResponse
+++	switch outcome {
+++	case "accepted":
+++		response.Toast = &callback.Toast{Type: "success", Content: "已收到确认"}
+++	case "duplicate":
+++		response.Toast = &callback.Toast{Type: "info", Content: "这张卡片已经处理过，请查看卡片状态"}
+++	case "ignored":
+++		return &response, nil
+++	default:
+++		response.Toast = &callback.Toast{Type: "warning", Content: "暂未确认，请查看卡片状态后重试"}
+++	}
+++	fmt.Fprintf(b.log, "飞书卡片回调 %s，服务端处理 %d ms\n", outcome, time.Since(start).Milliseconds())
+++	return &response, nil
+++}
+++
+++// The SDK's connection URL contains connection credentials, so log only the lifecycle.
+++type callbackLogger struct {
+++	out   io.Writer
+++	ready chan struct{}
+++	once  sync.Once
+++}
+++
+++func (*callbackLogger) Debug(context.Context, ...interface{}) {}
+++func (logger *callbackLogger) Info(_ context.Context, args ...interface{}) {
+++	if len(args) > 0 && strings.HasPrefix(fmt.Sprint(args[0]), "connected to ") {
+++		logger.once.Do(func() { close(logger.ready) })
+++		fmt.Fprintln(logger.out, "飞书卡片回调长连接已建立")
+++	}
+++}
+++func (*callbackLogger) Warn(context.Context, ...interface{})  {}
+++func (*callbackLogger) Error(context.Context, ...interface{}) {}
+++
+++func newAutoloopCallbacks(f *cmdutil.Factory) *cobra.Command {
+++	return &cobra.Command{
+++		Use:   "autoloop-card-callbacks",
+++		Short: "Receive card callbacks and respond after the hub records them",
+++		Args:  cobra.NoArgs,
+++		RunE: func(cmd *cobra.Command, _ []string) error {
+++			config, err := f.Config()
+++			if err != nil {
+++				return err
+++			}
+++			if !config.CanBot() || config.AppSecret == "" {
+++				return errors.New("Feishu bot credentials unavailable")
+++			}
+++			ctx, cancel := context.WithCancel(cmd.Context())
+++			defer cancel()
+++			bridge := &callbackBridge{
+++				out: json.NewEncoder(f.IOStreams.Out), log: f.IOStreams.ErrOut,
+++				pending: make(map[uint64]chan string),
+++			}
+++			go func() {
+++				bridge.replies(f.IOStreams.In)
+++				cancel()
+++			}()
+++			d := dispatcher.NewEventDispatcher("", "").OnP2CardActionTrigger(bridge.onCard)
+++			logger := &callbackLogger{out: f.IOStreams.ErrOut, ready: make(chan struct{})}
+++			d.InitConfig(larkevent.WithLogger(logger))
+++			listener := larkws.NewClient(config.AppID, config.AppSecret,
+++				larkws.WithEventHandler(d), larkws.WithDomain(core.ResolveOpenBaseURL(config.Brand)),
+++				larkws.WithLogger(logger))
+++			done := make(chan error, 1)
+++			go func() { done <- listener.Start(ctx) }()
+++			timer := time.NewTimer(12 * time.Second)
+++			defer timer.Stop()
+++			select {
+++			case <-ctx.Done():
+++				return nil
+++			case <-done:
+++				return errors.New("Feishu card callback connection closed")
+++			case <-timer.C:
+++				return errors.New("Feishu card callback connection not ready")
+++			case <-logger.ready:
+++				timer.Stop()
+++			}
+++			select {
+++			case <-ctx.Done():
+++				return nil
+++			case <-done:
+++				return errors.New("Feishu card callback connection closed")
+++			}
+++		},
+++	}
+++}
++diff --git a/cmd/autoloop_cards.go b/cmd/autoloop_cards.go
++new file mode 100644
++index 0000000..47e19dd
++--- /dev/null
+++++ b/cmd/autoloop_cards.go
++@@ -0,0 +1,59 @@
+++// SPDX-License-Identifier: MIT
+++package cmd
+++
+++import (
+++	"bufio"
+++	"context"
+++	"encoding/json"
+++	"net/http"
+++	"regexp"
+++	"time"
+++
+++	"github.com/larksuite/cli/internal/client"
+++	"github.com/larksuite/cli/internal/cmdutil"
+++	"github.com/larksuite/cli/internal/core"
+++	"github.com/larksuite/cli/internal/credential"
+++	"github.com/spf13/cobra"
+++)
+++
+++var cardMessageID = regexp.MustCompile("^om_[a-zA-Z0-9_-]+$")
+++
+++func newAutoloopCards(f *cmdutil.Factory) *cobra.Command {
+++	return &cobra.Command{
+++		Use:   "autoloop-card-patches",
+++		Short: "Update Feishu cards over a single authenticated client",
+++		Args:  cobra.NoArgs,
+++		RunE: func(cmd *cobra.Command, _ []string) error {
+++			api, err := f.NewAPIClient()
+++			if err != nil {
+++				return err
+++			}
+++			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+++			_, _ = api.Credential.ResolveToken(ctx, credential.NewTokenSpec(core.AsBot, api.Config.AppID))
+++			cancel()
+++			in := bufio.NewScanner(f.IOStreams.In)
+++			in.Buffer(make([]byte, 4096), 128*1024)
+++			out := json.NewEncoder(f.IOStreams.Out)
+++			for in.Scan() {
+++				var req struct {
+++					Ref     string `json:"ref"`
+++					Content string `json:"content"`
+++				}
+++				result := map[string]bool{"ok": false}
+++				if json.Unmarshal(in.Bytes(), &req) == nil && cardMessageID.MatchString(req.Ref) && len(req.Content) <= 30*1024 && json.Valid([]byte(req.Content)) {
+++					ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+++					response, err := api.CallAPI(ctx, client.RawApiRequest{
+++						Method: http.MethodPatch, URL: "/open-apis/im/v1/messages/" + req.Ref,
+++						Data: map[string]string{"content": req.Content}, As: core.AsBot,
+++					})
+++					cancel()
+++					result["ok"] = err == nil && api.CheckResponse(response, core.AsBot) == nil
+++				}
+++				if err := out.Encode(result); err != nil {
+++					return err
+++				}
+++			}
+++			return in.Err()
+++		},
+++	}
+++}
++diff --git a/cmd/build.go b/cmd/build.go
++index ae999c8..bc9ec58 100644
++--- a/cmd/build.go
+++++ b/cmd/build.go
++@@ -492,6 +492,8 @@ func assembleInternal(
++ 	rootCmd.AddCommand(doctor.NewCmdDoctorWithRecovery(f, runtime.recovery))
++ 	rootCmd.AddCommand(whoami.NewCmdWhoamiWithRecovery(f, runtime.recovery))
++ 	rootCmd.AddCommand(api.NewCmdApiWithContext(ctx, f, nil))
+++	rootCmd.AddCommand(newAutoloopCards(f))
+++	rootCmd.AddCommand(newAutoloopCallbacks(f))
++ 	rootCmd.AddCommand(schema.NewCmdSchemaWithVisibility(f, func(path []string) bool {
++ 		return runtime.surface.CanReference(surface.CommandID(strings.Join(path, "/")))
++ 	}, nil))
++diff --git a/events/im/card_action.go b/events/im/card_action.go
++index 678477c..85920b0 100644
++--- a/events/im/card_action.go
+++++ b/events/im/card_action.go
++@@ -6,6 +6,7 @@ package im
++ import (
++ 	"context"
++ 	"encoding/json"
+++	"os"
++ 	"strings"
++ 
++ 	"github.com/larksuite/cli/internal/event"
++@@ -87,7 +88,7 @@ func processCardAction(ctx context.Context, rt event.APIClient, raw *event.RawEv
++ 		Timezone:    envelope.Event.Action.Timezone,
++ 	}
++ 
++-	if out.MessageID != "" && rt != nil {
+++	if out.MessageID != "" && rt != nil && os.Getenv("AUTOLOOP_FEISHU_SKIP_CARD_LOOKUP") != "1" {
++ 		out.CardContent = fetchCardUserDSL(ctx, rt, out.MessageID)
++ 	}
++ 
 diff --git a/protocol/rules.ts b/protocol/rules.ts
 index 5189d00..0ded60b 100644
 --- a/protocol/rules.ts
@@ -988,7 +1458,7 @@ index 5189d00..0ded60b 100644
    const limits = new Map<string, number | undefined>();
    for (const { group, parallel } of rules.rules) {
 diff --git a/skills/agent-autoloop/SKILL.md b/skills/agent-autoloop/SKILL.md
-index 13bdb61..2fec421 100644
+index 13bdb61..8d087df 100644
 --- a/skills/agent-autoloop/SKILL.md
 +++ b/skills/agent-autoloop/SKILL.md
 @@ -7,6 +7,18 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
@@ -1019,6 +1489,15 @@ index 13bdb61..2fec421 100644
  每条规则回答五个问题：什么事件（`when`），交给谁（`to`），在哪（`cwd`），照什么做（`skill`、`prompt`），要不要告诉用户（`tell`，默认只在有卡片时）。
  
  ```json
+@@ -104,7 +118,7 @@ Claude 主任务要委托 Codex 操作网页时，从 `examples/recipes/browser-
+ "channels": { "feishu": { "key": "…", "user": "ou_用户的 open_id" } }
+ ```
+ 
+-同一个飞书应用的卡片点击只能有一个监听，只在一台电脑上跑。
++同一个飞书应用的卡片点击只能有一个监听，只在一台电脑上跑。 需要更快的原卡更新和「已收到确认」浮层，可按[飞书快速更新说明](../../plugins/feishu/fast-cli.md)启用。
+ 
+ **只会发文字的（钉钉、企微的群机器人，Slack、Discord 的 Webhook）**：用 `plugins/webhook/channel.ts`，`config.json` 的通道项写 `"use": "webhook"`、`"platform": "dingtalk"` 和 `"url": "已有的 Webhook 地址"`；平台也可选 `wecom`、`slack`、`discord`。别的平台只要收 JSON POST 也能接：不写 `platform`，写 `url` 和带 `{text}` 的 `body`，比如 Telegram 写 `"url": "https://api.telegram.org/bot<机器人令牌>/sendMessage"`、`"body": { "chat_id": "…", "text": "{text}" }`。`rules.json` 里写 `"links": true`，卡片链接本身就能回答；`config.json` 的 `hub.publicUrl` 要配成手机或电脑能打开的地址。
+ 
 diff --git a/tests/background-launch.test.ts b/tests/background-launch.test.ts
 new file mode 100644
 index 0000000..de7ffb0
@@ -1070,7 +1549,7 @@ index 0000000..de7ffb0
 +  assert.throws(() => read(""), /cwd/);
 +});
 diff --git a/tests/channels.test.ts b/tests/channels.test.ts
-index d38ddd3..bc112aa 100644
+index d38ddd3..a76c54e 100644
 --- a/tests/channels.test.ts
 +++ b/tests/channels.test.ts
 @@ -3,15 +3,15 @@
@@ -1092,6 +1571,19 @@ index d38ddd3..bc112aa 100644
  import { createServer } from "node:http";
  import type { AddressInfo } from "node:net";
  import { tmpdir } from "node:os";
+@@ -59,10 +59,10 @@ test("a card shows its options while it's open, and what became of it after", ()
+   assert.deepEqual(blocks[1].behaviors[0].value, { card: 5, choice: 1 });
+   assert.equal(blocks[1].border_color, "blue", "what's recommended stands out");
+   const said = (card: Card) => JSON.stringify(render(card).body.elements);
+-  assert.match(said({ ...base, state: "decided", choice: 1 }), /你选了「留着」，已记录/);
++  assert.match(said({ ...base, state: "decided", choice: 1 }), /已收到确认：留着。等待执行。/);
+   assert.ok(!said({ ...base, state: "decided", choice: 1 }).includes("callback"));
+   assert.match(said({ ...base, state: "done", choice: 0, result: "删了" }), /你选了「删」。已执行：删了/);
+-  assert.match(said({ ...base, state: "decided", answer: "归档" }), /你选了「归档」/);
++  assert.match(said({ ...base, state: "decided", answer: "归档" }), /已收到确认：归档。等待执行。/);
+   assert.match(said({ ...base, state: "closed", result: "问题自己好了" }), /不用决定了：问题自己好了/);
+   assert.match(said({ ...base, kind: "notice", state: "closed", options: [], result: "已处理" }), /已处理/);
+   const noticeOpen = JSON.stringify(render({ ...base, kind: "notice", options: [] }).body.elements);
 @@ -507,18 +507,26 @@ test("GitHub: signed or not taken, and what it says becomes a plain event", () =
    );
  });
@@ -1217,6 +1709,167 @@ index d75f39d..55a534e 100644
 +    "每月 1、3、5、7、9、11、13、15、17、19、21、23、25、27、29、31 日且为周一 09:00",
 +  );
  });
+diff --git a/tests/feishu-fast.test.ts b/tests/feishu-fast.test.ts
+new file mode 100644
+index 0000000..8e0a2db
+--- /dev/null
++++ b/tests/feishu-fast.test.ts
+@@ -0,0 +1,155 @@
++// Fast Feishu delivery can lose the original card or acknowledge an uncommitted or duplicate answer.
++import assert from "node:assert/strict";
++import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { after, test } from "node:test";
++import type { Card } from "../host/channels.ts";
++import feishu from "../plugins/feishu/channel.ts";
++
++const dir = mkdtempSync(join(tmpdir(), "feishu-fast-"));
++after(() => rmSync(dir, { recursive: true, force: true }));
++const base: Card = {
++  id: 5,
++  version: 1,
++  ref: null,
++  kind: "ask",
++  state: "open",
++  title: "要不要删",
++  text: "占了 10 GB",
++  options: ["删", "留着"],
++  recommend: 1,
++  choice: null,
++  answer: null,
++  result: null,
++  link: "https://hub.test/c/x",
++};
++
++test("feishu: fast patches reuse one process and a failed patch retries the original message", async () => {
++  const log = join(dir, "fast-patch.log");
++  const fastCli = join(dir, "lark-cli-fast");
++  const lark = join(dir, "lark-cli-fallback");
++  writeFileSync(
++    fastCli,
++    `#!/bin/sh
++case "$1" in
++  event) exec sleep 30 ;;
++  autoloop-card-patches)
++    echo start >> "${log}"
++    IFS= read -r first || exit 1
++    echo "$first" >> "${log}"
++    echo '{"ok":true}'
++    IFS= read -r second || exit 1
++    echo "$second" >> "${log}"
++    echo '{"ok":false}' ;;
++esac
++`,
++    { mode: 0o755 },
++  );
++  writeFileSync(
++    lark,
++    `#!/bin/sh
++echo "$*" >> "${log}"
++cat >> "${log}"
++echo >> "${log}"
++echo '{"ok":true}'
++`,
++    { mode: 0o755 },
++  );
++  const stop = new AbortController();
++  const cards: Card[] = [
++    { ...base, version: 2, ref: "om_5", state: "decided", choice: 1 },
++    { ...base, version: 3, ref: "om_5", state: "done", choice: 1, result: "测试结束" },
++  ];
++  const delivered: unknown[][] = [];
++  const hub = {
++    async nextCard() {
++      const card = cards.shift();
++      if (card) return { card };
++      stop.abort();
++      return { card: null };
++    },
++    async delivered(...args: unknown[]) {
++      delivered.push(args);
++    },
++  };
++  await feishu({ hub: hub as any, options: { user: "ou_me", lark, fastCli }, log: () => {}, signal: stop.signal });
++  const [start, first, second, fallback, body] = readFileSync(log, "utf8").trim().split("\n");
++  assert.equal(start, "start");
++  assert.match(JSON.parse(first).content, /已收到确认/);
++  assert.match(JSON.parse(second).content, /已执行：测试结束/);
++  assert.match(fallback, /^im messages patch --message-id om_5 /);
++  assert.deepEqual(JSON.parse(body), { content: JSON.parse(second).content });
++  assert.deepEqual(delivered, [
++    [5, 2, "om_5"],
++    [5, 3, "om_5"],
++  ]);
++});
++
++test("feishu: the callback acknowledges only a committed answer and reports a duplicate or rejection", async () => {
++  const file = join(dir, "toast-replies.ndjson");
++  const fastCli = join(dir, "lark-cli-toast");
++  const event = JSON.stringify({
++    action_value: JSON.stringify({ card: 5, choice: 1 }),
++    operator_id: "ou_me",
++    message_id: "om_5",
++  });
++  writeFileSync(
++    fastCli,
++    `#!/bin/sh
++case "$1" in
++  autoloop-card-patches) cat >/dev/null ;;
++  autoloop-card-callbacks)
++    printf '%s\n' '${event.slice(0, -1)},"receipt":1}' '${event.slice(0, -1)},"receipt":2}' '${event.slice(0, -1)},"receipt":3}'
++    exec cat > "${file}" ;;
++  *) exec sleep 30 ;;
++esac
++`,
++    { mode: 0o755 },
++  );
++  const stop = new AbortController();
++  let release: () => void = () => {};
++  const committed = new Promise<void>((resolve) => (release = resolve));
++  let calls = 0;
++  const hub = {
++    async nextCard() {
++      await new Promise((resolve) => setTimeout(resolve, 10));
++      return { card: null };
++    },
++    async answer() {
++      const call = ++calls;
++      if (call === 3) throw new Error("invalid message");
++      await committed;
++      return { changed: call === 1 };
++    },
++  };
++  const run = feishu({
++    hub: hub as any,
++    options: { user: "ou_me", lark: fastCli, fastCli, callbackToast: true },
++    log: () => {},
++    signal: stop.signal,
++  });
++  const read = () => (existsSync(file) ? readFileSync(file, "utf8").trim() : "");
++  try {
++    for (let i = 0; i < 100 && !read(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
++    assert.equal(calls, 3);
++    assert.equal(read(), '{"receipt":3,"outcome":"failed"}');
++    release();
++    for (let i = 0; i < 100 && read().split("\n").length < 3; i++)
++      await new Promise((resolve) => setTimeout(resolve, 10));
++    assert.deepEqual(
++      read()
++        .split("\n")
++        .map((line) => JSON.parse(line)),
++      [
++        { receipt: 3, outcome: "failed" },
++        { receipt: 1, outcome: "accepted" },
++        { receipt: 2, outcome: "duplicate" },
++      ],
++    );
++  } finally {
++    release();
++    stop.abort();
++    await run;
++  }
++});
 diff --git a/tests/gitea-history.test.mjs b/tests/gitea-history.test.mjs
 new file mode 100644
 index 0000000..83af71d

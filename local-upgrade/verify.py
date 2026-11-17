@@ -78,6 +78,8 @@ def verify_candidate(app, home, here, node, cli, run):
     finally:
         temporary_test.unlink()
 
+    verify_feishu_fast(app, home, here, node, run, config)
+
     metadata = app.parent / 'local-check.json'
     metadata.write_text(json.dumps({'agents': list(rules['agents'].values()),
                                     'channels': [entry.get('use', name) for name, entry in rules['channels'].items()],
@@ -100,3 +102,36 @@ def verify_candidate(app, home, here, node, cli, run):
     assert 'cron.anomaly' in watch['emits']['types']
     assert any(rule['to'] == 'onepanel-diagnose' and 'cron.anomaly' in rule['when'].get('types', [])
                for rule in rules['rules'])
+
+
+def verify_feishu_fast(app, home, here, node, run, config):
+    """Check the installed channel and candidate answer deduplication without contacting Feishu."""
+    settings = config.get('channels', {}).get('feishu', {})
+    binary = settings.get('fastCli')
+    if binary or settings.get('callbackToast') is True:
+        if not binary or not Path(binary).is_absolute() or not os.access(binary, os.X_OK):
+            raise RuntimeError('飞书快速更新命令不存在或不能执行')
+        for command in ('autoloop-card-patches', 'autoloop-card-callbacks'):
+            if command == 'autoloop-card-callbacks' and settings.get('callbackToast') is not True:
+                continue
+            output = run(binary, command, '--help', capture=True, timeout=10).decode()
+            if command not in output:
+                raise RuntimeError(f'飞书快速更新命令缺少 {command}')
+    print('验证飞书快速更新、回调浮层与中台去重', flush=True)
+    source = (here / 'feishu-fast.test.ts').read_text()
+    if (home / 'plugins/feishu/channel.ts').is_file():
+        source = source.replace('"../plugins/feishu/channel.ts"', '"../../plugins/feishu/channel.ts"')
+    probe = app / 'tests/local-feishu-fast.upgrade.test.ts'
+    probe.write_text(source)
+    # The conformance test makes its own temporary hub and credentials.
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('AGENT_AUTOLOOP_HOME', 'AGENT_AUTOLOOP_RULES')}
+    try:
+        run(node, '--test', probe, app / 'tests/conformance.test.ts', env=env)
+        cards = app / 'tests/cards.test.ts'
+        pattern = 'an answer counts once'
+        if pattern not in cards.read_text():
+            raise RuntimeError('中台回答去重测试入口已变更')
+        run(node, '--test', '--test-name-pattern=' + pattern, cards, env=env)
+    finally:
+        probe.unlink()
