@@ -267,7 +267,7 @@ index bf0cfb7..1961bbc 100644
  
    const unrouted = state.unrouted.slice(0, 5);
 diff --git a/docs/protocol.md b/docs/protocol.md
-index 5ca4c25..600f18a 100644
+index 841d331..b50225c 100644
 --- a/docs/protocol.md
 +++ b/docs/protocol.md
 @@ -102,6 +102,8 @@
@@ -988,7 +988,7 @@ index 5189d00..0ded60b 100644
    const limits = new Map<string, number | undefined>();
    for (const { group, parallel } of rules.rules) {
 diff --git a/skills/agent-autoloop/SKILL.md b/skills/agent-autoloop/SKILL.md
-index 7d25104..4779ad2 100644
+index 13bdb61..2fec421 100644
 --- a/skills/agent-autoloop/SKILL.md
 +++ b/skills/agent-autoloop/SKILL.md
 @@ -7,6 +7,18 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
